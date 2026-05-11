@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import statistics
 import time
-from collections import deque
 from typing import TYPE_CHECKING
 
 import random as _random
@@ -108,31 +106,6 @@ def pick_prompt_idx(
     return rng.choice(eligible)
 
 
-def _has_complete_boxed(text: str) -> bool:
-    """True iff ``text`` contains a balanced ``\\boxed{...}`` or ``\\fbox{...}``.
-
-    Mirrors the brace-walk in ``reliquary.environment.math._last_boxed_only_string``
-    so that we stop generation at exactly the point the env's reward extractor
-    would have a scoreable answer — nothing more.
-    """
-    for marker in ("\\boxed{", "\\fbox{"):
-        idx = text.rfind(marker)
-        if idx < 0:
-            continue
-        depth = 1
-        j = idx + len(marker)
-        while j < len(text):
-            c = text[j]
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
-                    return True
-            j += 1
-    return False
-
-
 def _compute_merkle_root(rollouts) -> str:
     """Compute Merkle root over rollout leaves — returns 64-char hex.
 
@@ -195,88 +168,6 @@ class MiningEngine:
 
         self._hidden_dim = resolve_hidden_size(hf_model)
         self._verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
-
-        # Resolve the EOS set the stopping criteria will recognise. Logged
-        # once at boot so any model swap with a different generation_config
-        # is immediately visible (catches a class of silent BAD_TERMINATION
-        # failures where the model emits an EOS variant we don't detect).
-        _eos_set: set[int] = set()
-        _gen_cfg = getattr(vllm_model, "generation_config", None)
-        if _gen_cfg is not None:
-            _cfg_eos = getattr(_gen_cfg, "eos_token_id", None)
-            if isinstance(_cfg_eos, int):
-                _eos_set = {_cfg_eos}
-            elif isinstance(_cfg_eos, (list, tuple)):
-                _eos_set = {int(e) for e in _cfg_eos if e is not None}
-        if not _eos_set and tokenizer.eos_token_id is not None:
-            _eos_set = {int(tokenizer.eos_token_id)}
-        logger.info(
-            "EOS set for stopping criteria: %s (pad_token_id=%s)",
-            sorted(_eos_set), tokenizer.pad_token_id,
-        )
-
-        # Per-prompt σ memory for frontier-band selection. Cleared on every
-        # checkpoint advance because the policy has shifted and old σ
-        # observations no longer predict the new in-zone band.
-        self._prompt_sigma_history: dict[int, deque] = {}
-        # Prompts observed with σ < threshold under the current checkpoint —
-        # excluded from both exploit and fallback paths until checkpoint
-        # advances. With 8 Bernoulli samples at T=0.9, a single σ=0 outcome
-        # (all-correct or all-wrong) is strong evidence the prompt sits
-        # outside the learnable band for this policy — retrying just wastes
-        # another full rollout group on a guaranteed OUT_OF_ZONE.
-        self._blacklisted_prompts: set[int] = set()
-        # Per-difficulty-level σ history. MATH problems have levels 1–5;
-        # Qwen3-4B-Instruct typically dominates level 1–2 (σ=0 all-correct)
-        # and struggles with 5 (σ=0 all-wrong) — the in-zone band tends to
-        # live in 3–4. We accumulate sigma observations per level and use
-        # the level distribution to bias fallback picks toward the
-        # currently most-learnable level.
-        self._level_sigma_history: dict[int, deque] = {}
-        # Pre-built level → list[prompt_idx] map, built lazily on first use.
-        self._prompts_by_level: dict[int, list[int]] | None = None
-        # Per-(level, subject) bucket σ history. MATH has 7 subjects ×
-        # 5 levels = 35 buckets, ~360 prompts each. Subject difficulty is
-        # orthogonal to level for Qwen3-4B (e.g. it crushes Prealgebra L5
-        # but struggles with Number Theory L3) — the joint prior catches
-        # this where the level-only prior cannot.
-        self._bucket_sigma_history: dict[tuple[int, str], deque] = {}
-        self._prompts_by_bucket: dict[tuple[int, str], list[int]] | None = None
-        # Prompts we've already submitted in the current window — the
-        # validator rejects re-submits of the same prompt within a window
-        # as SUPERSEDED, so picking the same prompt twice (which exploit
-        # mode tends to do when the pool is small) burns 200s of gen on
-        # a guaranteed rejection.
-        self._picked_this_window: set[int] = set()
-        self._last_seen_window: int = -1
-        self._stats_checkpoint_n: int = -1
-        self._STATS_MAXLEN = 5
-        # Single-observation is enough for inclusion: with ~12,500 prompts
-        # and ~50 picks/hour, repeat picks on the same prompt are rare, so
-        # waiting for 2 observations would keep the picker in fallback
-        # indefinitely. The blacklist (σ < threshold) already filters bad
-        # prompts; remaining observations are reliable enough.
-        self._STATS_MIN_OBS = 1
-        self._SIGMA_THRESHOLD = 0.43
-        self._EXPLORE_RATE = 0.20
-        # When True, the model is allowed to ramble to the protocol cap.
-        # This is the strategy observed in top-miner submission logs:
-        # long completions with multiple boxed answers manufacture variance
-        # on otherwise-easy prompts (env extracts the *last* boxed, which
-        # varies across sampling paths), keeping σ in-zone where
-        # early-stopping would land σ=0 / all-correct. Trade-off: ~8× slower
-        # generation per attempt. Worthwhile when windows stay open long
-        # (light competition); harmful when windows fill in seconds. Set
-        # via RELIQUARY_LET_MODEL_RAMBLE=1 environment variable.
-        import os as _os
-        self._LET_MODEL_RAMBLE = _os.environ.get(
-            "RELIQUARY_LET_MODEL_RAMBLE", "0"
-        ).strip() == "1"
-        # Exploit fires after 3 in-zone observations rather than 10 — the
-        # candidate pool grows slowly given the prompt count, and we'd
-        # rather concentrate on a thin pool of known-good than dilute back
-        # to uniform-random fallback.
-        self._MIN_FRONTIER_POOL = 3
 
     # ------------------------------------------------------------------
     # Public API
@@ -352,29 +243,14 @@ class MiningEngine:
                 # Pick prompt, generate, submit.
                 cooldown_set = set(state.cooldown_prompts)
                 try:
-                    prompt_idx, pick_mode, pick_sigma, pick_pool = (
-                        self._pick_prompt_idx_smart(
-                            cooldown_set, local_n, state.window_n, rng
-                        )
-                    )
+                    prompt_idx = pick_prompt_idx(self.env, cooldown_set, rng=rng)
                 except RuntimeError:
                     logger.info("env fully in cooldown; sleeping")
                     await asyncio.sleep(5)
                     continue
 
-                logger.info(
-                    "pick window=%d prompt=%d mode=%s mean_sigma=%s pool=%d ckpt_n=%d",
-                    state.window_n, prompt_idx, pick_mode,
-                    f"{pick_sigma:.3f}" if pick_sigma is not None else "n/a",
-                    pick_pool, local_n,
-                )
-
                 problem = self.env.get_problem(prompt_idx)
-
-                t_gen_start = time.perf_counter()
                 generations = self._generate_m_rollouts(problem, randomness)
-                t_gen_ms = int((time.perf_counter() - t_gen_start) * 1000)
-
                 if len(generations) < M_ROLLOUTS:
                     logger.warning(
                         "generated %d/%d for prompt %d; skipping",
@@ -382,51 +258,11 @@ class MiningEngine:
                     )
                     continue
 
-                t_proof_start = time.perf_counter()
                 rollout_submissions = [
                     self._build_rollout_submission(gen, problem, randomness)
                     for gen in generations
                 ]
                 merkle_root = _compute_merkle_root(rollout_submissions)
-                t_proof_ms = int((time.perf_counter() - t_proof_start) * 1000)
-
-                rewards_list = [r.reward for r in rollout_submissions]
-                sigma_obs = statistics.pstdev(rewards_list)
-                self._record_sigma(prompt_idx, sigma_obs, local_n)
-
-                # Pre-submit freshness check: generation took 10s–200s+; in
-                # that time the window may have sealed (→ window_not_active /
-                # window_mismatch reject) or the validator may have bounced
-                # (→ HTTP submit hangs until our 10s wait_for fires). A cheap
-                # /state poll with a 3s ceiling catches both cases and lets
-                # us skip a doomed submit before it ties up the loop.
-                try:
-                    fresh_state = await asyncio.wait_for(
-                        get_window_state_v2(url, client=client),
-                        timeout=3.0,
-                    )
-                    stale = (
-                        fresh_state.state != WindowState.OPEN
-                        or fresh_state.window_n != state.window_n
-                    )
-                    if stale:
-                        logger.warning(
-                            "skip stale submit window=%d prompt=%d rewards=%s "
-                            "sigma_obs=%.3f (validator window=%d state=%s)",
-                            state.window_n, prompt_idx, rewards_list, sigma_obs,
-                            fresh_state.window_n, fresh_state.state.value
-                            if hasattr(fresh_state.state, "value")
-                            else fresh_state.state,
-                        )
-                        continue
-                except (asyncio.TimeoutError, SubmissionError, Exception) as exc:
-                    logger.warning(
-                        "skip submit window=%d prompt=%d rewards=%s sigma_obs=%.3f "
-                        "(/state check failed: %s)",
-                        state.window_n, prompt_idx, rewards_list, sigma_obs,
-                        type(exc).__name__,
-                    )
-                    continue
 
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
@@ -436,43 +272,16 @@ class MiningEngine:
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
                 )
-                t_submit_start = time.perf_counter()
                 try:
-                    # Hard outer ceiling: submitter.py retries 3× with 60s
-                    # per-attempt timeout, so a hung connection (e.g. window
-                    # already sealed under load) can burn ~180s. We cap the
-                    # whole retry loop at 10s so the engine moves on to the
-                    # next window instead of starving on a doomed submission.
-                    resp = await asyncio.wait_for(
-                        submit_batch_v2(url, request, client=client),
-                        timeout=10.0,
-                    )
-                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
-                    reason_str = (
-                        resp.reason.value if hasattr(resp.reason, "value") else resp.reason
-                    )
+                    resp = await submit_batch_v2(url, request, client=client)
                     logger.info(
-                        "submit window=%d prompt=%d accepted=%s reason=%s "
-                        "rewards=%s sigma_obs=%.3f gen_ms=%d proof_ms=%d submit_ms=%d total_ms=%d "
-                        "blacklist=%d",
-                        state.window_n, prompt_idx, resp.accepted, reason_str,
-                        rewards_list, sigma_obs, t_gen_ms, t_proof_ms, t_submit_ms,
-                        t_gen_ms + t_proof_ms + t_submit_ms,
-                        len(self._blacklisted_prompts),
+                        "submitted window=%d prompt=%d accepted=%s reason=%s",
+                        state.window_n, prompt_idx, resp.accepted,
+                        resp.reason.value if hasattr(resp.reason, "value") else resp.reason,
                     )
                     results.append(resp)
-                except asyncio.TimeoutError:
-                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
-                    logger.error(
-                        "submit window=%d prompt=%d timeout submit_ms=%d rewards=%s sigma_obs=%.3f (abandoned)",
-                        state.window_n, prompt_idx, t_submit_ms, rewards_list, sigma_obs,
-                    )
                 except SubmissionError as exc:
-                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
-                    logger.error(
-                        "submit window=%d prompt=%d error submit_ms=%d rewards=%s sigma_obs=%.3f: %s",
-                        state.window_n, prompt_idx, t_submit_ms, rewards_list, sigma_obs, exc,
-                    )
+                    logger.error("submit failed: %s", exc)
 
         return results
 
@@ -561,58 +370,19 @@ class MiningEngine:
         "generate" in the usual sense.
         """
         import torch
-        from transformers import StoppingCriteria, StoppingCriteriaList
 
         prompt_tokens = self.tokenizer.encode(
             problem["prompt"], add_special_tokens=False
         )
         prompt_length = len(prompt_tokens)
 
-        # Stop as soon as every sample in the batch has emitted (a) a balanced
-        # \boxed{...} (or \fbox{...}) AND (b) any of the model's natural EOS
-        # tokens. The EOS set must match what validator's verify_termination
-        # accepts (validator/verifier.py:94-119): generation_config.eos_token_id
-        # if available (Qwen3-Instruct = [151645, 151643]), else tokenizer.eos_token_id.
-        # Checking only tokenizer.eos_token_id misses 151643 (endoftext) emissions
-        # — those samples then never stop early and run to the 8192-token cap,
-        # producing the 200+ second slow-tail batches.
-        tokenizer = self.tokenizer
-        eos_ids: set[int] = set()
-        gen_cfg = getattr(self.vllm_model, "generation_config", None)
-        if gen_cfg is not None:
-            cfg_eos = getattr(gen_cfg, "eos_token_id", None)
-            if isinstance(cfg_eos, int):
-                eos_ids = {cfg_eos}
-            elif isinstance(cfg_eos, (list, tuple)):
-                eos_ids = {int(e) for e in cfg_eos if e is not None}
-        if not eos_ids and tokenizer.eos_token_id is not None:
-            eos_ids = {int(tokenizer.eos_token_id)}
-
-        class _BoxedComplete(StoppingCriteria):
-            def __init__(self):
-                self._step = 0
-                self._done = [False] * M_ROLLOUTS
-
-            def __call__(self, input_ids, scores, **kwargs):
-                self._step += 1
-                if self._step % 16 != 0:
-                    return False
-                for i in range(input_ids.shape[0]):
-                    if self._done[i]:
-                        continue
-                    new_tokens = input_ids[i, prompt_length:].tolist()
-                    if not any(t in eos_ids for t in new_tokens):
-                        continue
-                    if _has_complete_boxed(tokenizer.decode(new_tokens)):
-                        self._done[i] = True
-                return all(self._done)
-
         with torch.no_grad():
             input_tensor = torch.tensor(
                 [prompt_tokens] * M_ROLLOUTS,
                 device=getattr(self.vllm_model, "device", "cpu"),
             )
-            generate_kwargs = dict(
+            outputs = self.vllm_model.generate(
+                input_tensor,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=True,
                 temperature=T_PROTO,
@@ -620,22 +390,16 @@ class MiningEngine:
                 top_k=TOP_K_PROTO,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
-            if not self._LET_MODEL_RAMBLE:
-                generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
-                    [_BoxedComplete()]
-                )
-            outputs = self.vllm_model.generate(input_tensor, **generate_kwargs)
+        eos = self.tokenizer.eos_token_id
         rollouts = []
         for i in range(M_ROLLOUTS):
             seq = outputs[i].tolist()
             gen = seq[prompt_length:]
-            # Truncate at the first occurrence of ANY EOS token in the
-            # validator-recognised set, not just tokenizer.eos_token_id —
-            # otherwise samples that ended with 151643 keep trailing
-            # padding tokens in the submission.
-            first_eos = next((j for j, t in enumerate(gen) if t in eos_ids), -1)
-            if first_eos >= 0:
+            try:
+                first_eos = gen.index(eos)
                 gen = gen[: first_eos + 1]
+            except ValueError:
+                pass
             rollouts.append({
                 "tokens": prompt_tokens + gen,
                 "prompt_length": prompt_length,
@@ -712,8 +476,8 @@ class MiningEngine:
         r_vec = self._verifier.generate_r_vec(randomness)
         commitments = self._verifier.create_commitments_batch(hidden_states, r_vec)
 
-        # Token log-probs from HF (bit-identical with validator)
-        log_probs = torch.log_softmax(logits[0], dim=-1)
+        # fp32 log_softmax to match the validator and reduce tail-token drift.
+        log_probs = torch.log_softmax(logits[0].float(), dim=-1)
         token_logprobs: list[float] = []
         for i in range(prompt_length, len(all_tokens)):
             token_logprobs.append(log_probs[i - 1, all_tokens[i]].item())
@@ -741,225 +505,3 @@ class MiningEngine:
                 "token_logprobs": token_logprobs,
             },
         }
-
-    def _reset_stats_if_stale(self, local_n: int) -> None:
-        if local_n != self._stats_checkpoint_n:
-            self._prompt_sigma_history.clear()
-            self._blacklisted_prompts.clear()
-            self._level_sigma_history.clear()
-            self._bucket_sigma_history.clear()
-            self._stats_checkpoint_n = local_n
-
-    def _get_level(self, prompt_idx: int) -> int | None:
-        """Read the MATH difficulty level (1–5) for a prompt, or None if
-        the underlying dataset doesn't expose it."""
-        dataset = getattr(self.env, "_dataset", None)
-        if dataset is None:
-            return None
-        try:
-            row = dataset[prompt_idx % len(dataset)]
-            level_str = str(row.get("level", "")).strip()
-            if not level_str:
-                return None
-            return int(level_str.split()[-1])
-        except (KeyError, ValueError, IndexError, TypeError):
-            return None
-
-    def _build_prompts_by_level(self) -> dict[int, list[int]]:
-        if self._prompts_by_level is None:
-            mapping: dict[int, list[int]] = {}
-            for i in range(len(self.env)):
-                level = self._get_level(i)
-                if level is not None:
-                    mapping.setdefault(level, []).append(i)
-            self._prompts_by_level = mapping
-        return self._prompts_by_level
-
-    def _get_subject(self, prompt_idx: int) -> str | None:
-        """Read the MATH subject (Algebra, Geometry, ...) for a prompt, or
-        None if the underlying dataset doesn't expose it."""
-        dataset = getattr(self.env, "_dataset", None)
-        if dataset is None:
-            return None
-        try:
-            row = dataset[prompt_idx % len(dataset)]
-            subject = row.get("type")
-            if subject is None:
-                return None
-            s = str(subject).strip()
-            return s or None
-        except (KeyError, IndexError, TypeError):
-            return None
-
-    def _build_prompts_by_bucket(self) -> dict[tuple[int, str], list[int]]:
-        if self._prompts_by_bucket is None:
-            mapping: dict[tuple[int, str], list[int]] = {}
-            for i in range(len(self.env)):
-                level = self._get_level(i)
-                subject = self._get_subject(i)
-                if level is not None and subject is not None:
-                    mapping.setdefault((level, subject), []).append(i)
-            self._prompts_by_bucket = mapping
-        return self._prompts_by_bucket
-
-    def _record_sigma(self, prompt_idx: int, sigma_obs: float, local_n: int) -> None:
-        self._reset_stats_if_stale(local_n)
-        hist = self._prompt_sigma_history.get(prompt_idx)
-        if hist is None:
-            hist = deque(maxlen=self._STATS_MAXLEN)
-            self._prompt_sigma_history[prompt_idx] = hist
-        hist.append(sigma_obs)
-        if sigma_obs < self._SIGMA_THRESHOLD:
-            self._blacklisted_prompts.add(prompt_idx)
-        level = self._get_level(prompt_idx)
-        subject = self._get_subject(prompt_idx)
-        if level is not None:
-            level_hist = self._level_sigma_history.get(level)
-            if level_hist is None:
-                level_hist = deque(maxlen=50)
-                self._level_sigma_history[level] = level_hist
-            level_hist.append(sigma_obs)
-        if level is not None and subject is not None:
-            bucket = (level, subject)
-            bucket_hist = self._bucket_sigma_history.get(bucket)
-            if bucket_hist is None:
-                bucket_hist = deque(maxlen=50)
-                self._bucket_sigma_history[bucket] = bucket_hist
-            bucket_hist.append(sigma_obs)
-
-    def _pick_prompt_idx_smart(
-        self,
-        cooldown_set: set[int],
-        local_n: int,
-        window_n: int,
-        rng: _random.Random,
-    ) -> tuple[int, str, float | None, int]:
-        """Frontier-band picker with ε-exploration.
-
-        Returns ``(prompt_idx, mode, mean_sigma_or_None, pool_size)``. Mode
-        is one of ``"explore"`` (ε-coin), ``"exploit"`` (frontier sample),
-        ``"bucket_biased"`` ((level, subject) prior), ``"level_biased"``
-        (level-only prior), or ``"fallback"`` (uniform random). The
-        exclusion set is cooldown ∪ blacklist ∪ already-picked-this-window
-        — the last component avoids `SUPERSEDED` rejections from the
-        validator when exploit mode re-picks the same prompt twice.
-        """
-        self._reset_stats_if_stale(local_n)
-        if window_n != self._last_seen_window:
-            self._picked_this_window.clear()
-            self._last_seen_window = window_n
-        excluded = (
-            cooldown_set | self._blacklisted_prompts | self._picked_this_window
-        )
-
-        chosen_idx, mode, mean_sigma, pool_size = self._pick_inner(
-            excluded, rng
-        )
-        self._picked_this_window.add(chosen_idx)
-        return chosen_idx, mode, mean_sigma, pool_size
-
-    def _pick_inner(
-        self, excluded: set[int], rng: _random.Random
-    ) -> tuple[int, str, float | None, int]:
-        if rng.random() < self._EXPLORE_RATE:
-            return pick_prompt_idx(self.env, excluded, rng=rng), "explore", None, 0
-
-        candidates: list[int] = []
-        weights: list[float] = []
-        for idx, hist in self._prompt_sigma_history.items():
-            if idx in excluded or len(hist) < self._STATS_MIN_OBS:
-                continue
-            mean_sigma = sum(hist) / len(hist)
-            if mean_sigma >= self._SIGMA_THRESHOLD:
-                candidates.append(idx)
-                weights.append(mean_sigma)
-
-        pool_size = len(candidates)
-        if pool_size >= self._MIN_FRONTIER_POOL:
-            chosen = rng.choices(candidates, weights=weights, k=1)[0]
-            chosen_mean = weights[candidates.index(chosen)]
-            return chosen, "exploit", chosen_mean, pool_size
-
-        # Bucket prior (level + subject) — finer-grained than level alone.
-        bucket_choice = self._pick_by_bucket_prior(excluded, rng)
-        if bucket_choice is not None:
-            return bucket_choice, "bucket_biased", None, pool_size
-
-        # Level prior — coarser fallback for buckets we haven't observed yet.
-        level_choice = self._pick_by_level_prior(excluded, rng)
-        if level_choice is not None:
-            return level_choice, "level_biased", None, pool_size
-        return pick_prompt_idx(self.env, excluded, rng=rng), "fallback", None, pool_size
-
-    def _pick_by_bucket_prior(
-        self, excluded: set[int], rng: _random.Random
-    ) -> int | None:
-        """Pick by (level, subject) bucket prior — finer-grained than level
-        alone. Combines the level static prior with observed mean σ per
-        bucket. Subject contributes via observations only (no static prior
-        because subject-difficulty is model-dependent and we don't want to
-        hardcode our intuitions about Qwen3's weak spots).
-        """
-        buckets_by_idx = self._build_prompts_by_bucket()
-        if not buckets_by_idx:
-            return None
-
-        STATIC_LEVEL = {1: 0.10, 2: 0.20, 3: 0.50, 4: 0.90, 5: 1.00}
-        buckets = sorted(buckets_by_idx.keys())
-        weights: list[float] = []
-        for bucket in buckets:
-            level, _subject = bucket
-            hist = self._bucket_sigma_history.get(bucket)
-            n_obs = len(hist) if hist else 0
-            observed_mean = (sum(hist) / n_obs) if n_obs else 0.0
-            alpha = min(0.7, n_obs / 10.0)
-            prior = STATIC_LEVEL.get(level, 0.5)
-            weights.append(alpha * observed_mean + (1.0 - alpha) * prior)
-
-        if not any(w > 0 for w in weights):
-            return None
-        chosen_bucket = rng.choices(buckets, weights=weights, k=1)[0]
-        bucket_prompts = buckets_by_idx[chosen_bucket]
-        eligible = [p for p in bucket_prompts if p not in excluded]
-        if not eligible:
-            return None
-        return rng.choice(eligible)
-
-    def _pick_by_level_prior(
-        self, excluded: set[int], rng: _random.Random
-    ) -> int | None:
-        """Pick a prompt by difficulty-level prior.
-
-        Combines a static prior (level 5 hardest → highest weight) with the
-        observed mean σ per level. The static prior dominates when we have
-        few observations; observations take over as they accumulate. Without
-        the static prior, all picks return σ=0 initially → all level weights
-        stay at 0 → picker falls back to uniform-random over all prompts,
-        which keeps hitting trivially-easy level 1–2 prompts that Qwen3-4B
-        solves 8/8.
-        """
-        levels_by_pid = self._build_prompts_by_level()
-        if not levels_by_pid:
-            return None
-
-        STATIC_PRIOR = {1: 0.10, 2: 0.20, 3: 0.50, 4: 0.90, 5: 1.00}
-        levels = sorted(levels_by_pid.keys())
-        weights: list[float] = []
-        for lv in levels:
-            hist = self._level_sigma_history.get(lv)
-            n_obs = len(hist) if hist else 0
-            observed_mean = (sum(hist) / n_obs) if n_obs else 0.0
-            # Observation weight ramps from 0 → 0.7 over ~14 obs. Below that
-            # the static prior keeps the picker pointed at hard levels.
-            alpha = min(0.7, n_obs / 20.0)
-            prior = STATIC_PRIOR.get(lv, 0.5)
-            weights.append(alpha * observed_mean + (1.0 - alpha) * prior)
-
-        if not any(w > 0 for w in weights):
-            return None
-        chosen_level = rng.choices(levels, weights=weights, k=1)[0]
-        level_prompts = levels_by_pid[chosen_level]
-        eligible = [p for p in level_prompts if p not in excluded]
-        if not eligible:
-            return None
-        return rng.choice(eligible)
