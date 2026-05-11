@@ -22,14 +22,17 @@ miner that materially improve a miner's acceptance rate:
      land out-of-zone; submitting them is a deterministic OUT_OF_ZONE
      reject and burns time in the SUPERSEDED race for the next prompt.
      We compute σ locally and skip the HTTP round-trip when σ < SIGMA_MIN.
-  4. Probe-then-continue rollout generation. Instead of always paying for
-     M_ROLLOUTS=8 rollouts up-front, we generate ``_PROBE_SIZE=3`` first
-     and abort the remaining 5 when ``k_probe ∈ {0, _PROBE_SIZE}`` — the
-     prompt is structurally extreme and would land out-of-zone with high
-     probability. P(false-abort) = 0.25 at the worst case (true p=0.5),
-     while P(true-abort) ≈ 0.73 at p∈{0.1, 0.9}: net positive savings on
-     uniform-prior unseen prompts, and the probe rollouts still feed the
-     Beta posterior so future picks are informed.
+  4. Probe-then-continue rollout generation with Bayesian abort. Instead
+     of always paying for M_ROLLOUTS=8 rollouts up-front, we generate
+     ``_PROBE_SIZE=3`` first and decide whether to fill out the group by
+     computing the posterior-predictive in-zone probability ``P(k_total
+     ∈ [2, 6] | k_probe, p̂_posterior, n_more=5)``. We abort when this
+     drops below ``_PROBE_ABORT_THRESHOLD=0.30``. This generalizes the
+     simpler ``k_probe ∈ {0, _PROBE_SIZE}`` rule with prior knowledge:
+     unseen prompts that probe extreme abort (as before), but a warm
+     mid-prompt that happens to roll k_probe=3/3 has a barely-shifted
+     posterior and continues — the older rule would have wastefully
+     aborted on the same observation.
   5. Posterior persistence. The Beta posterior is the only signal that
      accumulates across sessions; without persistence, a restart resets
      σ-yield to its initial uniform-random behaviour. Stats are saved
@@ -74,13 +77,21 @@ logger = logging.getLogger(__name__)
 _SUMMARY_EVERY = 10
 
 # Cold-start probe size. We generate this many rollouts first, decide whether
-# to continue based on k_probe, and either abort (skipping the remaining
-# M_ROLLOUTS - _PROBE_SIZE) or fill out a full group. _PROBE_SIZE=3 is the
-# sweet spot for M=8 binary rewards: P(false-abort | p=0.5) = 0.25 (we only
-# abort when the probe is uniform, which at true mid-difficulty is rare),
-# while P(true-abort | p∈{0.1,0.9}) = 0.73 (we catch structurally-extreme
-# prompts most of the time).
+# to continue based on k_probe and the prior posterior, and either abort
+# (skipping the remaining M_ROLLOUTS - _PROBE_SIZE) or fill out a full group.
+# _PROBE_SIZE=3 is the sweet spot for M=8 binary rewards: enough signal to
+# update the posterior meaningfully, small enough to make the abort cheap.
 _PROBE_SIZE = 3
+
+# Abort threshold for the Bayesian probe: if posterior-predictive
+# ``P(k_final ∈ [2, 6] | k_probe, posterior_mean, n_more)`` drops below
+# this, the expected value of continuing the remaining ``M - _PROBE_SIZE``
+# rollouts doesn't beat just trying another prompt. 0.30 reproduces the
+# hardcoded ``k_probe ∈ {0, _PROBE_SIZE}`` rule on Beta(1,1) priors and
+# generalizes correctly when prior history is informative — e.g. a
+# historically-mid prompt that probes 3/3 doesn't abort because the
+# posterior is barely shifted.
+_PROBE_ABORT_THRESHOLD = 0.30
 
 # Default location for the on-disk posterior cache. Resolved at engine
 # construction; the miner can override via the ``stats_path`` kwarg (set to
@@ -284,6 +295,38 @@ def _zone_probability(p: float) -> float:
     total = 0.0
     for k in range(_K_LO, min(_K_HI, M_ROLLOUTS) + 1):
         total += _BINOM_M[k] * (p ** k) * (q ** (M_ROLLOUTS - k))
+    return total
+
+
+def _continuation_in_zone_probability(
+    k_probe: int, p_hat: float, n_more: int,
+) -> float:
+    """Posterior-predictive ``P(k_total ∈ [K_LO, K_HI] | k_probe, p̂, n_more)``.
+
+    After the probe observes ``k_probe`` solves out of ``_PROBE_SIZE``,
+    the remaining ``n_more`` rollouts are modelled as
+    ``Binomial(n_more, p̂)`` where ``p̂`` is the posterior mean of the
+    solve rate (the Beta posterior updated by the probe's outcomes).
+    The group lands in-zone iff ``k_total = k_probe + k_more ∈ [K_LO, K_HI]``,
+    which means ``k_more ∈ [K_LO - k_probe, K_HI - k_probe]`` clamped to
+    ``[0, n_more]``.
+
+    Used by the probe abort gate. Lower than ``_PROBE_ABORT_THRESHOLD`` →
+    skip the remaining rollouts. Properly Bayesian: it generalizes the
+    hardcoded ``k_probe ∈ {0, _PROBE_SIZE}`` rule with prior knowledge.
+    Worked example: warm prompt with historic p≈0.5 probes 3/3 →
+    posterior barely shifts → continuation P ≈ 0.73 → continue (the old
+    rule would have aborted).
+    """
+    k_more_lo = max(0, _K_LO - k_probe)
+    k_more_hi = min(n_more, _K_HI - k_probe)
+    if k_more_lo > k_more_hi:
+        return 0.0
+    p = max(0.0, min(1.0, p_hat))
+    q = 1.0 - p
+    total = 0.0
+    for k in range(k_more_lo, k_more_hi + 1):
+        total += math.comb(n_more, k) * (p ** k) * (q ** (n_more - k))
     return total
 
 
@@ -797,18 +840,40 @@ class MiningEngine:
                 probe_lens = [length for _, length in probe_scored]
                 k_probe = sum(1 for r in probe_rewards if r >= 0.5)
 
-                if k_probe in (0, _PROBE_SIZE):
-                    # Extreme probe — abort. Record what we have so the
-                    # posterior moves toward the observed extreme rate.
+                # Bayesian abort: combine the prior Beta posterior with the
+                # probe observations to get a posterior mean, then ask whether
+                # the remaining ``M - _PROBE_SIZE`` rollouts at that solve rate
+                # still have a reasonable chance of finishing in-zone. This
+                # generalizes the old hardcoded ``k_probe ∈ {0, _PROBE_SIZE}``
+                # rule: an unseen prompt that probes 3/3 has posterior mean
+                # p̂≈0.8 and continuation probability ≈0.27 → abort, but a
+                # warm mid-prompt that happens to probe 3/3 has posterior
+                # barely shifted from p̂≈0.5 and continuation probability ≈0.73
+                # → continue (the old rule would have wastefully aborted).
+                a_prior, b_prior = self._prompt_stats.posterior(prompt_idx)
+                a_post = a_prior + k_probe
+                b_post = b_prior + (_PROBE_SIZE - k_probe)
+                p_hat_post = a_post / (a_post + b_post)
+                n_more = M_ROLLOUTS - _PROBE_SIZE
+                p_continue_zone = _continuation_in_zone_probability(
+                    k_probe, p_hat_post, n_more,
+                )
+
+                if p_continue_zone < _PROBE_ABORT_THRESHOLD:
+                    # Predicted continuation probability too low — abort.
+                    # Record probe outcomes so the posterior moves toward
+                    # the observed rate (informative for future picks).
                     self._prompt_stats.record_group(
                         prompt_idx, probe_rewards, completion_lens=probe_lens,
                     )
                     self._metrics.record_probe(k_probe, aborted=True)
                     logger.info(
                         "probe abort window=%d prompt=%d k_probe=%d/%d "
-                        "probe_ms=%.0f (saved %d rollouts)",
+                        "p_hat=%.2f p_continue_zone=%.2f probe_ms=%.0f "
+                        "(saved %d rollouts)",
                         state.window_n, prompt_idx, k_probe, _PROBE_SIZE,
-                        probe_ms, M_ROLLOUTS - _PROBE_SIZE,
+                        p_hat_post, p_continue_zone, probe_ms,
+                        M_ROLLOUTS - _PROBE_SIZE,
                     )
                     self._maybe_persist_stats()
                     if self._metrics.probe_attempts % _SUMMARY_EVERY == 0:
@@ -819,6 +884,12 @@ class MiningEngine:
                     continue
 
                 # Probe wasn't extreme — fill out the group.
+                logger.debug(
+                    "probe continue prompt=%d k_probe=%d/%d p_hat=%.2f "
+                    "p_continue_zone=%.2f",
+                    prompt_idx, k_probe, _PROBE_SIZE,
+                    p_hat_post, p_continue_zone,
+                )
                 self._metrics.record_probe(k_probe, aborted=False)
                 t_more = time.monotonic()
                 more_gens = self._generate_n_rollouts(
