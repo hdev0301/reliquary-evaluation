@@ -280,13 +280,48 @@ async def _amain(args: argparse.Namespace) -> int:
 
 def main() -> None:
     args = _parse_args()
+    level = getattr(logging, args.log_level)
+    # ``force=True`` is load-bearing: bittensor calls ``logging.basicConfig()``
+    # during its own import (visible as "Enabling default logging" at miner
+    # start), which without ``force=True`` makes our subsequent basicConfig a
+    # silent no-op — root logger keeps whatever bittensor set, and our
+    # carefully-placed engine INFO logs vanish even though they "should"
+    # propagate via the root. The symptom we observed: ``reliquary.miner.engine``
+    # logs missing despite ``reliquary.infrastructure.drand`` logs showing.
     logging.basicConfig(
-        level=getattr(logging, args.log_level),
+        level=level,
         format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+        force=True,
     )
+    # Belt-and-suspenders: explicitly pin all reliquary.* loggers to our
+    # level. Even if some part of the reliquary package later calls
+    # ``setLevel(WARNING)`` on its own logger (which the bittensor logger
+    # init has been observed to do for sibling loggers), this guarantees
+    # the engine, picker, persistence, etc. all stay at the chosen level.
+    logging.getLogger("reliquary").setLevel(level)
+    logging.getLogger("reliquary.miner.engine").setLevel(level)
+    logging.getLogger("reliquary.miner.engine").propagate = True
+    logging.getLogger("vllm_adapter").setLevel(level)
     # Quiet vLLM's noisy startup banner without dropping its warnings.
     for noisy in ("vllm", "vllm.engine", "vllm.executor"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    # Diagnostic prints so an operator can immediately tell, from the
+    # first three lines of the log, which engine.py is actually loaded
+    # and whether the picker/probe/submit logging will fire.
+    try:
+        import reliquary.miner.engine as _eng
+        import inspect
+        src = inspect.getsource(_eng)
+        logger.info(
+            "engine.py loaded from: %s (v3=%s, has_picker_log=%s, has_submit_log=%s)",
+            _eng.__file__,
+            "vllm_model" in src and "_is_vllm_adapter" in src,
+            "picked prompt=" in src,
+            "submit window=" in src,
+        )
+    except Exception:
+        logger.exception("could not introspect reliquary.miner.engine — package may be misconfigured")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

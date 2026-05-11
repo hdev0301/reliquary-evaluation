@@ -294,8 +294,13 @@ class VLLMAdapter:
             temperature, top_p, vllm_top_k,
         )
         t0 = time.monotonic()
+        # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg on LLM.generate();
+        # the prompt must be passed positionally as a TokensPrompt-shaped dict.
+        # Dict form ({"prompt_token_ids": ...}) works across 0.8.x–0.20.x —
+        # avoids importing TokensPrompt which moved between vllm.inputs and
+        # vllm.* in different versions.
         outputs = self._llm.generate(
-            prompt_token_ids=[prompt_tokens],
+            [{"prompt_token_ids": prompt_tokens}],
             sampling_params=params,
             use_tqdm=False,
         )
