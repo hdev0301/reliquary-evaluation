@@ -196,6 +196,25 @@ class MiningEngine:
         self._hidden_dim = resolve_hidden_size(hf_model)
         self._verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
 
+        # Resolve the EOS set the stopping criteria will recognise. Logged
+        # once at boot so any model swap with a different generation_config
+        # is immediately visible (catches a class of silent BAD_TERMINATION
+        # failures where the model emits an EOS variant we don't detect).
+        _eos_set: set[int] = set()
+        _gen_cfg = getattr(vllm_model, "generation_config", None)
+        if _gen_cfg is not None:
+            _cfg_eos = getattr(_gen_cfg, "eos_token_id", None)
+            if isinstance(_cfg_eos, int):
+                _eos_set = {_cfg_eos}
+            elif isinstance(_cfg_eos, (list, tuple)):
+                _eos_set = {int(e) for e in _cfg_eos if e is not None}
+        if not _eos_set and tokenizer.eos_token_id is not None:
+            _eos_set = {int(tokenizer.eos_token_id)}
+        logger.info(
+            "EOS set for stopping criteria: %s (pad_token_id=%s)",
+            sorted(_eos_set), tokenizer.pad_token_id,
+        )
+
         # Per-prompt σ memory for frontier-band selection. Cleared on every
         # checkpoint advance because the policy has shifted and old σ
         # observations no longer predict the new in-zone band.
