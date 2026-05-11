@@ -4,7 +4,7 @@ Protocol v2: free prompt selection (uniform random with cooldown skip),
 M rollouts per prompt at fixed temperature T_PROTO, local reward computation,
 Merkle root commitment, HTTP batch submission to validator.
 
-This evaluation contains three corrections over the upstream reference
+This evaluation contains five corrections over the upstream reference
 miner that materially improve a miner's acceptance rate:
 
   1. Per-window GRAIL randomness. The validator derives sketch randomness
@@ -22,6 +22,18 @@ miner that materially improve a miner's acceptance rate:
      land out-of-zone; submitting them is a deterministic OUT_OF_ZONE
      reject and burns time in the SUPERSEDED race for the next prompt.
      We compute σ locally and skip the HTTP round-trip when σ < SIGMA_MIN.
+  4. Probe-then-continue rollout generation. Instead of always paying for
+     M_ROLLOUTS=8 rollouts up-front, we generate ``_PROBE_SIZE=3`` first
+     and abort the remaining 5 when ``k_probe ∈ {0, _PROBE_SIZE}`` — the
+     prompt is structurally extreme and would land out-of-zone with high
+     probability. P(false-abort) = 0.25 at the worst case (true p=0.5),
+     while P(true-abort) ≈ 0.73 at p∈{0.1, 0.9}: net positive savings on
+     uniform-prior unseen prompts, and the probe rollouts still feed the
+     Beta posterior so future picks are informed.
+  5. Posterior persistence. The Beta posterior is the only signal that
+     accumulates across sessions; without persistence, a restart resets
+     σ-yield to its initial uniform-random behaviour. Stats are saved
+     atomically every ``_SUMMARY_EVERY`` attempts and loaded on startup.
 """
 
 from __future__ import annotations
@@ -57,8 +69,23 @@ logger = logging.getLogger(__name__)
 
 
 # Emit a rolling counter summary every N submission attempts. Set high enough
-# to avoid log spam, low enough to be a useful pulse during debugging.
+# to avoid log spam, low enough to be a useful pulse during debugging. Also
+# governs how often _PromptStats is flushed to disk.
 _SUMMARY_EVERY = 10
+
+# Cold-start probe size. We generate this many rollouts first, decide whether
+# to continue based on k_probe, and either abort (skipping the remaining
+# M_ROLLOUTS - _PROBE_SIZE) or fill out a full group. _PROBE_SIZE=3 is the
+# sweet spot for M=8 binary rewards: P(false-abort | p=0.5) = 0.25 (we only
+# abort when the probe is uniform, which at true mid-difficulty is rare),
+# while P(true-abort | p∈{0.1,0.9}) = 0.73 (we catch structurally-extreme
+# prompts most of the time).
+_PROBE_SIZE = 3
+
+# Default location for the on-disk posterior cache. Resolved at engine
+# construction; the miner can override via the ``stats_path`` kwarg (set to
+# ``None`` to disable persistence).
+_DEFAULT_STATS_PATH = ".reliquary_miner_stats.json"
 
 
 @dataclass
@@ -72,10 +99,39 @@ class _MinerMetrics:
     accepted: int = 0
     rejected: int = 0
     network_errors: int = 0
+    # Total rollout groups generated (= submitted + local_out_of_zone).
+    # Use ``in_zone_rate`` to track picker quality — the fraction of
+    # generated groups that pass the σ ≥ SIGMA_MIN gate locally.
+    generated: int = 0
     # Local short-circuits (we declined to submit because we predicted
     # OUT_OF_ZONE from the rewards distribution).
     local_out_of_zone: int = 0
+    # Probe aborts (cold-start ``_PROBE_SIZE`` rollouts produced an extreme
+    # k_probe; the remaining M_ROLLOUTS - _PROBE_SIZE rollouts were skipped).
+    # Use ``probe_abort_rate`` to track how often the probe is paying off;
+    # if abort_rate is very low (< 15%) the probe overhead dominates and
+    # we should consider disabling it.
+    probe_aborts: int = 0
+    probe_attempts: int = 0
+    # Histogram of k_solved over all generated groups — quick visual on
+    # whether the model + picker is producing a healthy mid-difficulty
+    # distribution or piling up at the extremes.
+    k_histogram: list[int] = field(default_factory=lambda: [0] * (M_ROLLOUTS + 1))
+    # Histogram of k_probe over all probe attempts (0..._PROBE_SIZE).
+    probe_histogram: list[int] = field(default_factory=lambda: [0] * (_PROBE_SIZE + 1))
     reasons: dict[str, int] = field(default_factory=dict)
+
+    def record_generation(self, k_solved: int) -> None:
+        self.generated += 1
+        if 0 <= k_solved <= M_ROLLOUTS:
+            self.k_histogram[k_solved] += 1
+
+    def record_probe(self, k_probe: int, aborted: bool) -> None:
+        self.probe_attempts += 1
+        if 0 <= k_probe <= _PROBE_SIZE:
+            self.probe_histogram[k_probe] += 1
+        if aborted:
+            self.probe_aborts += 1
 
     def record(self, accepted: bool, reason: str | None) -> None:
         self.submitted += 1
@@ -92,17 +148,48 @@ class _MinerMetrics:
     def record_network_error(self) -> None:
         self.network_errors += 1
 
-    def summary(self) -> str:
-        # Compact one-liner: "submitted=N accepted=A (rate%) rejected=R
-        # local_oos=L net_err=E top=reason:count,reason:count,..."
+    @property
+    def in_zone_rate(self) -> float:
+        return (
+            (self.generated - self.local_out_of_zone) / self.generated * 100.0
+            if self.generated else 0.0
+        )
+
+    @property
+    def probe_abort_rate(self) -> float:
+        return (
+            self.probe_aborts / self.probe_attempts * 100.0
+            if self.probe_attempts else 0.0
+        )
+
+    def summary(self, stats: "_PromptStats | None" = None) -> str:
+        # Compact one-liner with the picker's key signals:
+        #   - in_zone_rate: % of generated groups that pass σ ≥ SIGMA_MIN
+        #     locally. Climbs as the Beta posterior warms up.
+        #   - probe_abort: how often the cold-start probe aborted before
+        #     paying for the full 8-rollout batch. Higher early, lower as
+        #     posteriors concentrate on mid-difficulty prompts.
+        #   - warmed/observed: how many prompts have ≥5 attempts vs touched.
+        #     Picker exploitation strengthens with warmed count.
         rate = (self.accepted / self.submitted * 100.0) if self.submitted else 0.0
         top = sorted(self.reasons.items(), key=lambda kv: -kv[1])[:4]
         top_str = ",".join(f"{r}:{c}" for r, c in top) or "-"
+        warm_str = ""
+        if stats is not None:
+            warmed, observed = stats.warmed_count()
+            warm_str = f" warmed={warmed}/{observed}"
+        k_str = "/".join(str(c) for c in self.k_histogram)  # k=0..M
+        probe_str = (
+            f" probe_abort={self.probe_aborts}/{self.probe_attempts}"
+            f"({self.probe_abort_rate:.0f}%)"
+            if self.probe_attempts else ""
+        )
         return (
+            f"generated={self.generated} in_zone={self.in_zone_rate:.1f}% "
             f"submitted={self.submitted} accepted={self.accepted} "
             f"({rate:.1f}%) rejected={self.rejected} "
-            f"local_oos={self.local_out_of_zone} net_err={self.network_errors} "
-            f"top=[{top_str}]"
+            f"local_oos={self.local_out_of_zone} net_err={self.network_errors}"
+            f"{probe_str}{warm_str} k_hist=[{k_str}] top=[{top_str}]"
         )
 
 
@@ -271,6 +358,71 @@ class _PromptStats:
         v = self._lengths.get(prompt_idx)
         return v[0] if v else None
 
+    def warmed_count(self, min_attempts: int = 5) -> tuple[int, int]:
+        """Return ``(warmed, observed)`` — count of prompts with ≥
+        ``min_attempts`` rollouts vs. total prompts touched.
+
+        Used to surface picker-warmup progress in the rolling metrics
+        line; until ``warmed`` is in the hundreds the picker is still
+        in exploration mode and σ-yield will lag steady-state.
+        """
+        observed = len(self._counts)
+        warmed = sum(1 for solves_attempts in self._counts.values()
+                     if solves_attempts[1] >= min_attempts)
+        return warmed, observed
+
+    def save_to(self, path: str) -> None:
+        """Atomically persist posterior + length stats to *path* as JSON.
+
+        Atomic-write pattern (write to ``path.tmp``, then ``os.replace``)
+        guarantees the file is never partially-written even if the miner
+        is killed mid-save — the validator's SUPERSEDED race makes
+        graceful shutdown unreliable.
+        """
+        import json
+        import os
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        payload = {
+            "alpha_prior": self.alpha_prior,
+            "beta_prior": self.beta_prior,
+            "counts": {str(k): list(v) for k, v in self._counts.items()},
+            "lengths": {str(k): list(v) for k, v in self._lengths.items()},
+        }
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+
+    def load_from(self, path: str) -> bool:
+        """Load posterior + length stats from *path*. Returns True if loaded.
+
+        Silently returns False if the file doesn't exist or is corrupt —
+        a missing/malformed cache is not a fatal error, we just start
+        with fresh priors. Corrupt caches usually result from a crash
+        during save in older versions without atomic-replace; deleting
+        the file is the right recovery.
+        """
+        import json
+        import os
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            return False
+        self.alpha_prior = float(payload.get("alpha_prior", self.alpha_prior))
+        self.beta_prior = float(payload.get("beta_prior", self.beta_prior))
+        self._counts = {
+            int(k): (int(v[0]), int(v[1]))
+            for k, v in (payload.get("counts") or {}).items()
+        }
+        self._lengths = {
+            int(k): (float(v[0]), int(v[1]))
+            for k, v in (payload.get("lengths") or {}).items()
+        }
+        return True
+
 
 def pick_prompt_idx(
     env,
@@ -278,7 +430,7 @@ def pick_prompt_idx(
     *,
     rng: _random.Random | None = None,
     stats: _PromptStats | None = None,
-    candidates: int = 16,
+    candidates: int = 32,
     max_attempts: int = 1000,
 ) -> int:
     """Best-of-K Thompson-sampled prompt selection optimised for GRPO yield.
@@ -296,6 +448,12 @@ def pick_prompt_idx(
        are broken in favour of shorter average completion length when
        known (faster generation → more SUPERSEDED wins on subsequent
        prompts in the same window).
+
+    ``candidates=32`` is a deliberate balance: large enough that warm
+    prompts (concentrated Beta near p≈0.5, zone_p≈0.99) consistently
+    surface, small enough that Thompson exploration on unseen Beta(1,1)
+    prompts still wins ~5–10% of picks. K=16 was too noisy during the
+    warmup phase; K≫64 over-exploits and starves exploration.
 
     Without ``stats`` (test path), falls back to uniform random with
     cooldown skip — backward compatible with the upstream miner.
@@ -402,6 +560,7 @@ class MiningEngine:
         proof_gpu: int = 1,
         max_new_tokens: int = MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override: str | None = None,
+        stats_path: str | None = _DEFAULT_STATS_PATH,
     ) -> None:
         self.vllm_model = vllm_model
         self.hf_model = hf_model
@@ -428,11 +587,52 @@ class MiningEngine:
         # Per-prompt success-rate tracker used by ``pick_prompt_idx`` to
         # avoid prompts that recently produced all-correct or all-wrong
         # groups (guaranteed OUT_OF_ZONE under the σ ≥ SIGMA_MIN gate).
+        # Restored from disk if a cached posterior exists so a miner restart
+        # doesn't reset σ-yield to its uniform-random baseline.
         self._prompt_stats = _PromptStats()
+        self._stats_path = stats_path
+        if self._stats_path:
+            try:
+                if self._prompt_stats.load_from(self._stats_path):
+                    warmed, observed = self._prompt_stats.warmed_count()
+                    logger.info(
+                        "loaded prompt stats from %s: observed=%d warmed=%d",
+                        self._stats_path, observed, warmed,
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to load prompt stats from %s; starting fresh",
+                    self._stats_path,
+                )
+        # Save-throttling — only flush to disk every _SUMMARY_EVERY
+        # generations so we don't pay JSON-encode cost on the hot path.
+        self._save_counter: int = 0
 
         # Rolling counters for the structured-summary log emitted every
         # ``_SUMMARY_EVERY`` submission attempts and on window transitions.
         self._metrics = _MinerMetrics()
+
+    def _maybe_persist_stats(self) -> None:
+        """Flush the Beta posterior + length stats to disk every
+        ``_SUMMARY_EVERY`` writes. Bound to the same cadence as the metrics
+        summary so an operator can correlate the two log lines.
+
+        Atomic-write inside ``save_to`` guarantees we never leave a
+        truncated file even if the miner is killed mid-flush. A failed
+        save is logged but never raised — persistence is best-effort.
+        """
+        if not self._stats_path:
+            return
+        self._save_counter += 1
+        if self._save_counter % _SUMMARY_EVERY != 0:
+            return
+        try:
+            self._prompt_stats.save_to(self._stats_path)
+        except Exception:
+            logger.exception(
+                "failed to persist prompt stats to %s; continuing",
+                self._stats_path,
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -522,7 +722,8 @@ class MiningEngine:
                     if last_window_n is not None:
                         logger.info(
                             "window %d → %d | %s",
-                            last_window_n, state.window_n, self._metrics.summary(),
+                            last_window_n, state.window_n,
+                            self._metrics.summary(self._prompt_stats),
                         )
                     else:
                         logger.info(
@@ -574,15 +775,66 @@ class MiningEngine:
                     _zone_probability(p_hat), problem.get("id", "?"),
                 )
 
-                t_gen = time.monotonic()
-                generations = self._generate_m_rollouts(problem, randomness)
-                gen_ms = (time.monotonic() - t_gen) * 1000.0
-                if len(generations) < M_ROLLOUTS:
+                # Cold-start probe. Generate _PROBE_SIZE rollouts first,
+                # decide whether to fill out the group based on how many
+                # solved. If k_probe is 0 or _PROBE_SIZE the prompt is
+                # structurally extreme and the remaining rollouts are very
+                # likely to also land out-of-zone — skip them and recoup
+                # ~60% of the generation cost. The probe rollouts still
+                # update the Beta posterior so future picks are informed.
+                t_probe = time.monotonic()
+                probe_gens = self._generate_n_rollouts(problem, _PROBE_SIZE)
+                probe_ms = (time.monotonic() - t_probe) * 1000.0
+                if len(probe_gens) < _PROBE_SIZE:
                     logger.warning(
-                        "generated %d/%d for prompt %d (gen_ms=%.0f); skipping",
-                        len(generations), M_ROLLOUTS, prompt_idx, gen_ms,
+                        "probe generated %d/%d for prompt %d (probe_ms=%.0f); skipping",
+                        len(probe_gens), _PROBE_SIZE, prompt_idx, probe_ms,
                     )
                     continue
+
+                probe_scored = [self._score_rollout(g, problem) for g in probe_gens]
+                probe_rewards = [r for r, _ in probe_scored]
+                probe_lens = [length for _, length in probe_scored]
+                k_probe = sum(1 for r in probe_rewards if r >= 0.5)
+
+                if k_probe in (0, _PROBE_SIZE):
+                    # Extreme probe — abort. Record what we have so the
+                    # posterior moves toward the observed extreme rate.
+                    self._prompt_stats.record_group(
+                        prompt_idx, probe_rewards, completion_lens=probe_lens,
+                    )
+                    self._metrics.record_probe(k_probe, aborted=True)
+                    logger.info(
+                        "probe abort window=%d prompt=%d k_probe=%d/%d "
+                        "probe_ms=%.0f (saved %d rollouts)",
+                        state.window_n, prompt_idx, k_probe, _PROBE_SIZE,
+                        probe_ms, M_ROLLOUTS - _PROBE_SIZE,
+                    )
+                    self._maybe_persist_stats()
+                    if self._metrics.probe_attempts % _SUMMARY_EVERY == 0:
+                        logger.info(
+                            "metrics | %s",
+                            self._metrics.summary(self._prompt_stats),
+                        )
+                    continue
+
+                # Probe wasn't extreme — fill out the group.
+                self._metrics.record_probe(k_probe, aborted=False)
+                t_more = time.monotonic()
+                more_gens = self._generate_n_rollouts(
+                    problem, M_ROLLOUTS - _PROBE_SIZE
+                )
+                more_ms = (time.monotonic() - t_more) * 1000.0
+                gen_ms = probe_ms + more_ms
+                if len(more_gens) < M_ROLLOUTS - _PROBE_SIZE:
+                    logger.warning(
+                        "continuation generated %d/%d for prompt %d "
+                        "(gen_ms=%.0f); skipping",
+                        len(more_gens), M_ROLLOUTS - _PROBE_SIZE,
+                        prompt_idx, gen_ms,
+                    )
+                    continue
+                generations = probe_gens + more_gens
 
                 t_proof = time.monotonic()
                 rollout_submissions = [
@@ -604,11 +856,14 @@ class MiningEngine:
                 self._prompt_stats.record_group(
                     prompt_idx, rewards, completion_lens=completion_lens,
                 )
+                self._metrics.record_generation(k_solved)
+                self._maybe_persist_stats()
                 logger.info(
                     "rollouts ready window=%d prompt=%d k=%d/%d sigma=%.3f "
-                    "in_zone=%s gen_ms=%.0f proof_ms=%.0f completion_len[min/med/max]=%d/%d/%d",
+                    "in_zone=%s probe_ms=%.0f more_ms=%.0f proof_ms=%.0f "
+                    "completion_len[min/med/max]=%d/%d/%d",
                     state.window_n, prompt_idx, k_solved, M_ROLLOUTS, sigma, in_zone,
-                    gen_ms, proof_ms,
+                    probe_ms, more_ms, proof_ms,
                     min(completion_lens),
                     sorted(completion_lens)[len(completion_lens) // 2],
                     max(completion_lens),
@@ -627,8 +882,8 @@ class MiningEngine:
                         "local OUT_OF_ZONE (sigma=%.3f < %.2f) prompt=%d k=%d/%d — skipping submit",
                         sigma, SIGMA_MIN, prompt_idx, k_solved, M_ROLLOUTS,
                     )
-                    if (self._metrics.submitted + self._metrics.local_out_of_zone) % _SUMMARY_EVERY == 0:
-                        logger.info("metrics | %s", self._metrics.summary())
+                    if self._metrics.generated % _SUMMARY_EVERY == 0:
+                        logger.info("metrics | %s", self._metrics.summary(self._prompt_stats))
                     continue
 
                 merkle_root = _compute_merkle_root(rollout_submissions)
@@ -668,7 +923,7 @@ class MiningEngine:
                     )
 
                 if self._metrics.submitted and self._metrics.submitted % _SUMMARY_EVERY == 0:
-                    logger.info("metrics | %s", self._metrics.summary())
+                    logger.info("metrics | %s", self._metrics.summary(self._prompt_stats))
 
         return results
 
@@ -743,18 +998,23 @@ class MiningEngine:
         logger.info("Checkpoint %s loaded into both models", local_path)
         return self.hf_model
 
-    def _generate_m_rollouts(self, problem, randomness) -> list[dict]:
-        """Generate M_ROLLOUTS completions at T_PROTO in one batched call.
+    def _generate_n_rollouts(self, problem, n: int) -> list[dict]:
+        """Generate ``n`` completions at T_PROTO in one batched call.
 
-        One .generate() with batch shape (M_ROLLOUTS, prompt_len) is ~5-7×
-        faster on GPU than M_ROLLOUTS serial calls — the matmul tiling
-        utilizes far more of the GPU's compute. Each row samples
-        independently (do_sample=True), so GRPO-group semantics are
-        preserved. Each output row is truncated at its first post-prompt
-        EOS so trailing batch-padding (which HF pads with pad_token_id =
-        eos_token_id) is not carried downstream — otherwise the validator's
-        GRAIL forward pass would see extra EOS tokens the miner didn't
-        "generate" in the usual sense.
+        One .generate() with batch shape (n, prompt_len) is ~5-7× faster
+        on GPU than n serial calls — the matmul tiling utilizes far more
+        of the GPU's compute. Each row samples independently
+        (do_sample=True), so GRPO-group semantics are preserved. Each
+        output row is truncated at its first post-prompt EOS so trailing
+        batch-padding (HF pads with pad_token_id = eos_token_id) is not
+        carried downstream — otherwise the validator's GRAIL forward
+        pass would see extra EOS tokens the miner didn't "generate" in
+        the usual sense.
+
+        Called twice per attempt by ``mine_window``: once with
+        ``n=_PROBE_SIZE`` for the cold-start probe, and (only if the
+        probe doesn't abort) once with ``n=M_ROLLOUTS - _PROBE_SIZE`` to
+        fill out the group.
         """
         import torch
 
@@ -765,7 +1025,7 @@ class MiningEngine:
 
         with torch.no_grad():
             input_tensor = torch.tensor(
-                [prompt_tokens] * M_ROLLOUTS,
+                [prompt_tokens] * n,
                 device=getattr(self.vllm_model, "device", "cpu"),
             )
             outputs = self.vllm_model.generate(
@@ -779,7 +1039,7 @@ class MiningEngine:
             )
         eos = self.tokenizer.eos_token_id
         rollouts = []
-        for i in range(M_ROLLOUTS):
+        for i in range(n):
             seq = outputs[i].tolist()
             gen = seq[prompt_length:]
             try:
@@ -792,6 +1052,21 @@ class MiningEngine:
                 "prompt_length": prompt_length,
             })
         return rollouts
+
+    def _score_rollout(self, generation: dict, problem: dict) -> tuple[float, int]:
+        """Decode + score a single generation without building the GRAIL
+        proof. Returns ``(reward, completion_length)``.
+
+        Used during the cold-start probe so we can decide whether to
+        abort BEFORE paying for proof construction. The proof is built
+        later only for groups that survive the probe gate.
+        """
+        all_tokens = generation["tokens"]
+        prompt_length = generation["prompt_length"]
+        completion_tokens = all_tokens[prompt_length:]
+        completion_text = self.tokenizer.decode(completion_tokens)
+        reward = self.env.compute_reward(problem, completion_text)
+        return reward, len(completion_tokens)
 
     def _build_rollout_submission(self, generation, problem, randomness):
         """Build a RolloutSubmission: completion + claimed reward + GRAIL commit."""
