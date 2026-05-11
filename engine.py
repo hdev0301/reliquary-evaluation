@@ -226,6 +226,19 @@ class MiningEngine:
         self._STATS_MIN_OBS = 1
         self._SIGMA_THRESHOLD = 0.43
         self._EXPLORE_RATE = 0.20
+        # When True, the model is allowed to ramble to the protocol cap.
+        # This is the strategy observed in top-miner submission logs:
+        # long completions with multiple boxed answers manufacture variance
+        # on otherwise-easy prompts (env extracts the *last* boxed, which
+        # varies across sampling paths), keeping σ in-zone where
+        # early-stopping would land σ=0 / all-correct. Trade-off: ~8× slower
+        # generation per attempt. Worthwhile when windows stay open long
+        # (light competition); harmful when windows fill in seconds. Set
+        # via RELIQUARY_LET_MODEL_RAMBLE=1 environment variable.
+        import os as _os
+        self._LET_MODEL_RAMBLE = _os.environ.get(
+            "RELIQUARY_LET_MODEL_RAMBLE", "0"
+        ).strip() == "1"
         # Exploit fires after 3 in-zone observations rather than 10 — the
         # candidate pool grows slowly given the prompt count, and we'd
         # rather concentrate on a thin pool of known-good than dilute back
@@ -487,16 +500,24 @@ class MiningEngine:
         prompt_length = len(prompt_tokens)
 
         # Stop as soon as every sample in the batch has emitted (a) a balanced
-        # \boxed{...} (or \fbox{...}) AND (b) the model's natural EOS token.
-        # Both conditions are required: without (a), Qwen3-4B rambles to the
-        # protocol cap and σ=0 dominates; without (b), the validator's
-        # verify_termination (validator/verifier.py:50-135) rejects the
-        # rollout as BAD_TERMINATION because the last token isn't EOS. HF
-        # pads finished samples with pad_token_id == eos_token_id, so EOS
-        # appearing anywhere in the post-prompt range is a reliable signal
-        # that the sample naturally terminated.
+        # \boxed{...} (or \fbox{...}) AND (b) any of the model's natural EOS
+        # tokens. The EOS set must match what validator's verify_termination
+        # accepts (validator/verifier.py:94-119): generation_config.eos_token_id
+        # if available (Qwen3-Instruct = [151645, 151643]), else tokenizer.eos_token_id.
+        # Checking only tokenizer.eos_token_id misses 151643 (endoftext) emissions
+        # — those samples then never stop early and run to the 8192-token cap,
+        # producing the 200+ second slow-tail batches.
         tokenizer = self.tokenizer
-        eos_id = tokenizer.eos_token_id
+        eos_ids: set[int] = set()
+        gen_cfg = getattr(self.vllm_model, "generation_config", None)
+        if gen_cfg is not None:
+            cfg_eos = getattr(gen_cfg, "eos_token_id", None)
+            if isinstance(cfg_eos, int):
+                eos_ids = {cfg_eos}
+            elif isinstance(cfg_eos, (list, tuple)):
+                eos_ids = {int(e) for e in cfg_eos if e is not None}
+        if not eos_ids and tokenizer.eos_token_id is not None:
+            eos_ids = {int(tokenizer.eos_token_id)}
 
         class _BoxedComplete(StoppingCriteria):
             def __init__(self):
@@ -511,7 +532,7 @@ class MiningEngine:
                     if self._done[i]:
                         continue
                     new_tokens = input_ids[i, prompt_length:].tolist()
-                    if eos_id not in new_tokens:
+                    if not any(t in eos_ids for t in new_tokens):
                         continue
                     if _has_complete_boxed(tokenizer.decode(new_tokens)):
                         self._done[i] = True
@@ -522,26 +543,30 @@ class MiningEngine:
                 [prompt_tokens] * M_ROLLOUTS,
                 device=getattr(self.vllm_model, "device", "cpu"),
             )
-            outputs = self.vllm_model.generate(
-                input_tensor,
+            generate_kwargs = dict(
                 max_new_tokens=self.max_new_tokens,
                 do_sample=True,
                 temperature=T_PROTO,
                 top_p=TOP_P_PROTO,
                 top_k=TOP_K_PROTO,
                 pad_token_id=self.tokenizer.pad_token_id,
-                stopping_criteria=StoppingCriteriaList([_BoxedComplete()]),
             )
-        eos = self.tokenizer.eos_token_id
+            if not self._LET_MODEL_RAMBLE:
+                generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                    [_BoxedComplete()]
+                )
+            outputs = self.vllm_model.generate(input_tensor, **generate_kwargs)
         rollouts = []
         for i in range(M_ROLLOUTS):
             seq = outputs[i].tolist()
             gen = seq[prompt_length:]
-            try:
-                first_eos = gen.index(eos)
+            # Truncate at the first occurrence of ANY EOS token in the
+            # validator-recognised set, not just tokenizer.eos_token_id —
+            # otherwise samples that ended with 151643 keep trailing
+            # padding tokens in the submission.
+            first_eos = next((j for j, t in enumerate(gen) if t in eos_ids), -1)
+            if first_eos >= 0:
                 gen = gen[: first_eos + 1]
-            except ValueError:
-                pass
             rollouts.append({
                 "tokens": prompt_tokens + gen,
                 "prompt_length": prompt_length,
