@@ -200,6 +200,13 @@ class MiningEngine:
         # checkpoint advance because the policy has shifted and old σ
         # observations no longer predict the new in-zone band.
         self._prompt_sigma_history: dict[int, deque] = {}
+        # Prompts observed with σ < threshold under the current checkpoint —
+        # excluded from both exploit and fallback paths until checkpoint
+        # advances. With 8 Bernoulli samples at T=0.9, a single σ=0 outcome
+        # (all-correct or all-wrong) is strong evidence the prompt sits
+        # outside the learnable band for this policy — retrying just wastes
+        # another full rollout group on a guaranteed OUT_OF_ZONE.
+        self._blacklisted_prompts: set[int] = set()
         self._stats_checkpoint_n: int = -1
         self._STATS_MAXLEN = 5
         self._STATS_MIN_OBS = 2
@@ -317,7 +324,8 @@ class MiningEngine:
                 merkle_root = _compute_merkle_root(rollout_submissions)
                 t_proof_ms = int((time.perf_counter() - t_proof_start) * 1000)
 
-                sigma_obs = statistics.pstdev([r.reward for r in rollout_submissions])
+                rewards_list = [r.reward for r in rollout_submissions]
+                sigma_obs = statistics.pstdev(rewards_list)
                 self._record_sigma(prompt_idx, sigma_obs, local_n)
 
                 request = BatchSubmissionRequest(
@@ -345,23 +353,25 @@ class MiningEngine:
                     )
                     logger.info(
                         "submit window=%d prompt=%d accepted=%s reason=%s "
-                        "sigma_obs=%.3f gen_ms=%d proof_ms=%d submit_ms=%d total_ms=%d",
+                        "rewards=%s sigma_obs=%.3f gen_ms=%d proof_ms=%d submit_ms=%d total_ms=%d "
+                        "blacklist=%d",
                         state.window_n, prompt_idx, resp.accepted, reason_str,
-                        sigma_obs, t_gen_ms, t_proof_ms, t_submit_ms,
+                        rewards_list, sigma_obs, t_gen_ms, t_proof_ms, t_submit_ms,
                         t_gen_ms + t_proof_ms + t_submit_ms,
+                        len(self._blacklisted_prompts),
                     )
                     results.append(resp)
                 except asyncio.TimeoutError:
                     t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
                     logger.error(
-                        "submit window=%d prompt=%d timeout submit_ms=%d sigma_obs=%.3f (abandoned)",
-                        state.window_n, prompt_idx, t_submit_ms, sigma_obs,
+                        "submit window=%d prompt=%d timeout submit_ms=%d rewards=%s sigma_obs=%.3f (abandoned)",
+                        state.window_n, prompt_idx, t_submit_ms, rewards_list, sigma_obs,
                     )
                 except SubmissionError as exc:
                     t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
                     logger.error(
-                        "submit window=%d prompt=%d error submit_ms=%d sigma_obs=%.3f: %s",
-                        state.window_n, prompt_idx, t_submit_ms, sigma_obs, exc,
+                        "submit window=%d prompt=%d error submit_ms=%d rewards=%s sigma_obs=%.3f: %s",
+                        state.window_n, prompt_idx, t_submit_ms, rewards_list, sigma_obs, exc,
                     )
 
         return results
@@ -458,12 +468,17 @@ class MiningEngine:
         )
         prompt_length = len(prompt_tokens)
 
-        # Stop as soon as every sample in the batch has emitted a balanced
-        # \boxed{...} (or \fbox{...}). Without this, Qwen3-4B-Instruct often
-        # rambles to max_new_tokens on MATH problems and never produces a
-        # scoreable answer → σ=0 / OUT_OF_ZONE. Check every 16 steps to keep
-        # decode overhead under ~1 % of step time.
+        # Stop as soon as every sample in the batch has emitted (a) a balanced
+        # \boxed{...} (or \fbox{...}) AND (b) the model's natural EOS token.
+        # Both conditions are required: without (a), Qwen3-4B rambles to the
+        # protocol cap and σ=0 dominates; without (b), the validator's
+        # verify_termination (validator/verifier.py:50-135) rejects the
+        # rollout as BAD_TERMINATION because the last token isn't EOS. HF
+        # pads finished samples with pad_token_id == eos_token_id, so EOS
+        # appearing anywhere in the post-prompt range is a reliable signal
+        # that the sample naturally terminated.
         tokenizer = self.tokenizer
+        eos_id = tokenizer.eos_token_id
 
         class _BoxedComplete(StoppingCriteria):
             def __init__(self):
@@ -478,6 +493,8 @@ class MiningEngine:
                     if self._done[i]:
                         continue
                     new_tokens = input_ids[i, prompt_length:].tolist()
+                    if eos_id not in new_tokens:
+                        continue
                     if _has_complete_boxed(tokenizer.decode(new_tokens)):
                         self._done[i] = True
                 return all(self._done)
@@ -616,6 +633,7 @@ class MiningEngine:
     def _reset_stats_if_stale(self, local_n: int) -> None:
         if local_n != self._stats_checkpoint_n:
             self._prompt_sigma_history.clear()
+            self._blacklisted_prompts.clear()
             self._stats_checkpoint_n = local_n
 
     def _record_sigma(self, prompt_idx: int, sigma_obs: float, local_n: int) -> None:
@@ -625,6 +643,8 @@ class MiningEngine:
             hist = deque(maxlen=self._STATS_MAXLEN)
             self._prompt_sigma_history[prompt_idx] = hist
         hist.append(sigma_obs)
+        if sigma_obs < self._SIGMA_THRESHOLD:
+            self._blacklisted_prompts.add(prompt_idx)
 
     def _pick_prompt_idx_smart(
         self,
@@ -636,17 +656,20 @@ class MiningEngine:
 
         Returns ``(prompt_idx, mode, mean_sigma_or_None, pool_size)``. Mode
         is one of ``"explore"`` (ε-coin), ``"exploit"`` (frontier sample),
-        or ``"fallback"`` (pool too small).
+        or ``"fallback"`` (pool too small). The exclusion set is the union
+        of the validator's cooldown set and our local blacklist of prompts
+        seen with σ < threshold under the current checkpoint.
         """
         self._reset_stats_if_stale(local_n)
+        excluded = cooldown_set | self._blacklisted_prompts
 
         if rng.random() < self._EXPLORE_RATE:
-            return pick_prompt_idx(self.env, cooldown_set, rng=rng), "explore", None, 0
+            return pick_prompt_idx(self.env, excluded, rng=rng), "explore", None, 0
 
         candidates: list[int] = []
         weights: list[float] = []
         for idx, hist in self._prompt_sigma_history.items():
-            if idx in cooldown_set or len(hist) < self._STATS_MIN_OBS:
+            if idx in excluded or len(hist) < self._STATS_MIN_OBS:
                 continue
             mean_sigma = sum(hist) / len(hist)
             if mean_sigma >= self._SIGMA_THRESHOLD:
@@ -658,4 +681,4 @@ class MiningEngine:
             chosen = rng.choices(candidates, weights=weights, k=1)[0]
             chosen_mean = weights[candidates.index(chosen)]
             return chosen, "exploit", chosen_mean, pool_size
-        return pick_prompt_idx(self.env, cooldown_set, rng=rng), "fallback", None, pool_size
+        return pick_prompt_idx(self.env, excluded, rng=rng), "fallback", None, pool_size
