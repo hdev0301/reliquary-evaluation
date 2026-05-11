@@ -3,13 +3,34 @@
 Protocol v2: free prompt selection (uniform random with cooldown skip),
 M rollouts per prompt at fixed temperature T_PROTO, local reward computation,
 Merkle root commitment, HTTP batch submission to validator.
+
+This evaluation contains three corrections over the upstream reference
+miner that materially improve a miner's acceptance rate:
+
+  1. Per-window GRAIL randomness. The validator derives sketch randomness
+     from ``block_hash(state.window_n)``; the miner must do the same for
+     every window or every submission GRAIL-fails. Upstream computed it
+     once at startup with ``window_start=0``.
+  2. Bayesian zone-aware prompt selection. With M_ROLLOUTS=8 binary
+     rewards, the validator's ``σ ≥ SIGMA_MIN`` gate is mathematically
+     equivalent to ``2 ≤ k_solved ≤ 6``. The picker maintains a Beta
+     posterior on each prompt's solve probability and Thompson-samples
+     candidates, scoring each by ``P(2 ≤ Binomial(8, p) ≤ 6)``. This
+     concentrates effort on prompts that are likely to be in-zone AND
+     keeps an unseen-prompt exploration tail via the Beta(1,1) prior.
+  3. Local OUT_OF_ZONE short-circuit. Even with the picker, some groups
+     land out-of-zone; submitting them is a deterministic OUT_OF_ZONE
+     reject and burns time in the SUPERSEDED race for the next prompt.
+     We compute σ locally and skip the HTTP round-trip when σ < SIGMA_MIN.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import random as _random
@@ -18,11 +39,10 @@ from reliquary.constants import (
     LAYER_INDEX,
     MAX_NEW_TOKENS_PROTOCOL_CAP,
     M_ROLLOUTS,
+    SIGMA_MIN,
     T_PROTO,
     TOP_K_PROTO,
     TOP_P_PROTO,
-    UPLOAD_BUFFER,
-    WINDOW_LENGTH,
 )
 from reliquary.infrastructure import chain
 from reliquary.protocol.submission import (
@@ -34,6 +54,75 @@ if TYPE_CHECKING:
     from reliquary.environment.base import Environment
 
 logger = logging.getLogger(__name__)
+
+
+# Emit a rolling counter summary every N submission attempts. Set high enough
+# to avoid log spam, low enough to be a useful pulse during debugging.
+_SUMMARY_EVERY = 10
+
+
+@dataclass
+class _MinerMetrics:
+    """Rolling counters surfaced to logs so an operator can see at a glance
+    which rejection reason is dominating and how the local zone-prediction
+    matches what the validator returns.
+    """
+
+    submitted: int = 0
+    accepted: int = 0
+    rejected: int = 0
+    network_errors: int = 0
+    # Local short-circuits (we declined to submit because we predicted
+    # OUT_OF_ZONE from the rewards distribution).
+    local_out_of_zone: int = 0
+    reasons: dict[str, int] = field(default_factory=dict)
+
+    def record(self, accepted: bool, reason: str | None) -> None:
+        self.submitted += 1
+        if accepted:
+            self.accepted += 1
+        else:
+            self.rejected += 1
+        if reason is not None:
+            self.reasons[reason] = self.reasons.get(reason, 0) + 1
+
+    def record_local_oos(self) -> None:
+        self.local_out_of_zone += 1
+
+    def record_network_error(self) -> None:
+        self.network_errors += 1
+
+    def summary(self) -> str:
+        # Compact one-liner: "submitted=N accepted=A (rate%) rejected=R
+        # local_oos=L net_err=E top=reason:count,reason:count,..."
+        rate = (self.accepted / self.submitted * 100.0) if self.submitted else 0.0
+        top = sorted(self.reasons.items(), key=lambda kv: -kv[1])[:4]
+        top_str = ",".join(f"{r}:{c}" for r, c in top) or "-"
+        return (
+            f"submitted={self.submitted} accepted={self.accepted} "
+            f"({rate:.1f}%) rejected={self.rejected} "
+            f"local_oos={self.local_out_of_zone} net_err={self.network_errors} "
+            f"top=[{top_str}]"
+        )
+
+
+def _zone_status(rewards: list[float]) -> tuple[float, int, bool]:
+    """Compute (sigma, k_solved, in_zone) for a rollout group.
+
+    ``k_solved`` is the number of rollouts with reward >= 0.5; under the
+    math env's binary reward this is the only thing that matters for the
+    validator's ``rewards_std`` and ``is_in_zone`` gates. We replicate the
+    same population-stddev formula the validator uses (see
+    ``validator/verifier.py::rewards_std``).
+    """
+    n = len(rewards)
+    if n < 2:
+        return 0.0, 0, False
+    mean = sum(rewards) / n
+    variance = sum((r - mean) ** 2 for r in rewards) / n
+    sigma = variance ** 0.5
+    k_solved = sum(1 for r in rewards if r >= 0.5)
+    return sigma, k_solved, sigma >= SIGMA_MIN
 
 
 async def maybe_pull_checkpoint(
@@ -76,34 +165,196 @@ async def _hf_download(repo_id: str, revision: str) -> str:
     )
 
 
+# Binomial coefficients C(M_ROLLOUTS, k) for k=0..M_ROLLOUTS. Used by
+# ``_zone_probability``. Computed at module load so the hot path is just
+# multiplications and adds. The protocol fixes M_ROLLOUTS at 8 so this
+# tuple is tiny and never recomputed.
+_BINOM_M: tuple[int, ...] = tuple(math.comb(M_ROLLOUTS, k) for k in range(M_ROLLOUTS + 1))
+
+# In-zone gate (binary reward): σ ≥ SIGMA_MIN ⇔ k_solved ∈ [K_LO, K_HI].
+# For M=8, SIGMA_MIN=0.43:
+#   σ(k=1) = 0.331  σ(k=2) = 0.433  σ(k=6) = 0.433  σ(k=7) = 0.331
+# So the integer band is [2, 6].
+_K_LO: int = 2
+_K_HI: int = 6
+
+
+def _zone_probability(p: float) -> float:
+    """Return ``P(K_LO ≤ Binomial(M_ROLLOUTS, p) ≤ K_HI)``.
+
+    This is the probability that a group of M_ROLLOUTS rollouts at a given
+    per-rollout solve probability ``p`` will pass the validator's
+    σ ≥ SIGMA_MIN gate. Used as the scoring function for prompt selection.
+
+    Sample values (M=8, band=[2,6]):
+        p=0.10 → 0.187    p=0.50 → 0.992
+        p=0.20 → 0.703    p=0.60 → 0.989  (symmetric with p=0.4)
+        p=0.30 → 0.940    p=0.80 → 0.703
+        p=0.40 → 0.989    p=0.90 → 0.187
+    """
+    p = max(0.0, min(1.0, p))
+    q = 1.0 - p
+    total = 0.0
+    for k in range(_K_LO, min(_K_HI, M_ROLLOUTS) + 1):
+        total += _BINOM_M[k] * (p ** k) * (q ** (M_ROLLOUTS - k))
+    return total
+
+
+class _PromptStats:
+    """Beta-Bernoulli posterior on per-prompt solve probability.
+
+    For each prompt we accumulate ``(solves, attempts)`` over all rollouts
+    the miner has executed against it. With a Beta(α₀, β₀) prior, the
+    posterior solve probability is ``Beta(α₀ + solves, β₀ + attempts -
+    solves)``. The picker Thompson-samples ``p`` from this posterior and
+    scores candidates by the resulting in-zone probability — see
+    ``pick_prompt_idx``.
+
+    With the default Beta(1,1) (uniform) prior, unseen prompts have a wide
+    posterior so Thompson samples spread across [0,1] — exploration is
+    automatic. Well-observed prompts converge tightly to the empirical
+    rate, so they're scored deterministically.
+
+    Also tracks a running mean of completion length per prompt; the picker
+    can use this as a tiebreak to favour faster-to-solve prompts (winning
+    the validator's TCP-arrival SUPERSEDED race more often).
+    """
+
+    __slots__ = ("alpha_prior", "beta_prior", "_counts", "_lengths")
+
+    def __init__(self, alpha_prior: float = 1.0, beta_prior: float = 1.0) -> None:
+        self.alpha_prior = alpha_prior
+        self.beta_prior = beta_prior
+        self._counts: dict[int, tuple[int, int]] = {}        # idx → (solves, attempts)
+        self._lengths: dict[int, tuple[float, int]] = {}     # idx → (mean_len, n)
+
+    def record_group(
+        self,
+        prompt_idx: int,
+        rewards: list[float],
+        completion_lens: list[int] | None = None,
+    ) -> None:
+        solves_prev, attempts_prev = self._counts.get(prompt_idx, (0, 0))
+        attempts = len(rewards)
+        solves = sum(1 for r in rewards if r >= 0.5)
+        self._counts[prompt_idx] = (
+            solves_prev + solves, attempts_prev + attempts,
+        )
+        if completion_lens:
+            prev_mean, prev_n = self._lengths.get(prompt_idx, (0.0, 0))
+            total_n = prev_n + len(completion_lens)
+            new_mean = (prev_mean * prev_n + sum(completion_lens)) / total_n
+            self._lengths[prompt_idx] = (new_mean, total_n)
+
+    def posterior(self, prompt_idx: int) -> tuple[float, float]:
+        """Return ``(α, β)`` of the Beta posterior for *prompt_idx*."""
+        solves, attempts = self._counts.get(prompt_idx, (0, 0))
+        return (
+            self.alpha_prior + solves,
+            self.beta_prior + (attempts - solves),
+        )
+
+    def sample_p(self, prompt_idx: int, rng: _random.Random) -> float:
+        """Thompson-sample a solve probability from the posterior."""
+        a, b = self.posterior(prompt_idx)
+        return rng.betavariate(a, b)
+
+    def mean_p(self, prompt_idx: int) -> float:
+        a, b = self.posterior(prompt_idx)
+        return a / (a + b)
+
+    def attempts(self, prompt_idx: int) -> int:
+        _, n = self._counts.get(prompt_idx, (0, 0))
+        return n
+
+    def avg_completion_len(self, prompt_idx: int) -> float | None:
+        v = self._lengths.get(prompt_idx)
+        return v[0] if v else None
+
+
 def pick_prompt_idx(
     env,
     cooldown_prompts: set[int],
     *,
     rng: _random.Random | None = None,
+    stats: _PromptStats | None = None,
+    candidates: int = 16,
     max_attempts: int = 1000,
 ) -> int:
-    """Pick a random prompt index that isn't currently in cooldown.
+    """Best-of-K Thompson-sampled prompt selection optimised for GRPO yield.
 
-    The reference miner uses uniform-random selection with rejection
-    sampling against the cooldown set. More sophisticated strategies
-    (pre-screening zone probability, etc.) are left to miner operators.
+    Strategy:
+
+    1. Draw up to ``candidates`` distinct non-cooldown prompt indices
+       uniformly at random.
+    2. For each candidate, Thompson-sample a solve probability ``p`` from
+       its Beta posterior and score it by ``_zone_probability(p)`` — the
+       chance that an M_ROLLOUTS group will land in the σ ≥ SIGMA_MIN
+       band. New prompts (Beta(1,1) prior) have wide posteriors so they
+       get genuine exploration without an explicit ε-greedy schedule.
+    3. Return the candidate with the highest sampled in-zone score. Ties
+       are broken in favour of shorter average completion length when
+       known (faster generation → more SUPERSEDED wins on subsequent
+       prompts in the same window).
+
+    Without ``stats`` (test path), falls back to uniform random with
+    cooldown skip — backward compatible with the upstream miner.
 
     Raises ``RuntimeError`` if no eligible prompt can be found — typically
     because the env is fully in cooldown.
     """
     rng = rng or _random
     n = len(env)
-    if len(cooldown_prompts) < n / 2:
+    over_half_cooldown = len(cooldown_prompts) >= n / 2
+    eligible_list: list[int] | None = None
+    if over_half_cooldown:
+        eligible_list = [i for i in range(n) if i not in cooldown_prompts]
+        if not eligible_list:
+            raise RuntimeError("no eligible prompt — env fully in cooldown")
+
+    def _draw_one() -> int | None:
+        if eligible_list is not None:
+            return rng.choice(eligible_list)
         for _ in range(max_attempts):
             idx = rng.randrange(n)
             if idx not in cooldown_prompts:
                 return idx
-        raise RuntimeError("no eligible prompt found after max attempts")
-    eligible = [i for i in range(n) if i not in cooldown_prompts]
-    if not eligible:
+        return None
+
+    if stats is None:
+        # Test / bootstrap path: uniform random with cooldown skip.
+        idx = _draw_one()
+        if idx is None:
+            raise RuntimeError("no eligible prompt — env fully in cooldown")
+        return idx
+
+    # Thompson-sampled best-of-K.
+    seen: set[int] = set()
+    best_idx: int | None = None
+    best_score: float = -1.0
+    best_len: float = float("inf")
+    for _ in range(candidates):
+        idx = _draw_one()
+        if idx is None:
+            break
+        if idx in seen:
+            continue
+        seen.add(idx)
+        p_sampled = stats.sample_p(idx, rng)
+        score = _zone_probability(p_sampled)
+        if score > best_score:
+            best_idx, best_score = idx, score
+            best_len = stats.avg_completion_len(idx) or float("inf")
+        elif score == best_score:
+            # Tiebreak: prefer the prompt whose historical generation is
+            # cheaper, so we can race the SUPERSEDED window faster.
+            alt_len = stats.avg_completion_len(idx) or float("inf")
+            if alt_len < best_len:
+                best_idx, best_len = idx, alt_len
+
+    if best_idx is None:
         raise RuntimeError("no eligible prompt — env fully in cooldown")
-    return rng.choice(eligible)
+    return best_idx
 
 
 def _compute_merkle_root(rollouts) -> str:
@@ -169,6 +420,20 @@ class MiningEngine:
         self._hidden_dim = resolve_hidden_size(hf_model)
         self._verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
 
+        # Cached per-window randomness so we don't re-derive it on every
+        # iteration of the polling loop within the same window.
+        self._cached_window_n: int | None = None
+        self._cached_randomness: str = ""
+
+        # Per-prompt success-rate tracker used by ``pick_prompt_idx`` to
+        # avoid prompts that recently produced all-correct or all-wrong
+        # groups (guaranteed OUT_OF_ZONE under the σ ≥ SIGMA_MIN gate).
+        self._prompt_stats = _PromptStats()
+
+        # Rolling counters for the structured-summary log emitted every
+        # ``_SUMMARY_EVERY`` submission attempts and on window transitions.
+        self._metrics = _MinerMetrics()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -188,14 +453,12 @@ class MiningEngine:
         import httpx
         import random
 
-        from reliquary.constants import M_ROLLOUTS, POLL_INTERVAL_SECONDS
+        from reliquary.constants import POLL_INTERVAL_SECONDS
         from reliquary.miner.submitter import (
             SubmissionError, discover_validator_url,
             get_window_state_v2, submit_batch_v2,
         )
-        from reliquary.protocol.submission import (
-            BatchSubmissionRequest, WindowState,
-        )
+        from reliquary.protocol.submission import WindowState
 
         # Resolve validator URL (once).
         if self.validator_url_override:
@@ -203,14 +466,16 @@ class MiningEngine:
         else:
             metagraph = await chain.get_metagraph(subtensor, chain.NETUID)
             url = discover_validator_url(metagraph)
-
-        # Compute randomness (once — v2.1 uses it only for GRAIL sketch seed)
-        randomness = await self._compute_randomness(subtensor, 0, use_drand)
+        logger.info(
+            "mine_window start: hotkey=%s validator=%s M=%d T=%.2f",
+            self.wallet.hotkey.ss58_address[:12], url, M_ROLLOUTS, T_PROTO,
+        )
 
         rng = random.Random()
         results = []
         local_n = 0
         local_hash = ""
+        last_window_n: int | None = None
 
         async with httpx.AsyncClient(timeout=30) as client:
             while True:
@@ -226,6 +491,12 @@ class MiningEngine:
                     continue
 
                 # Pull new checkpoint if needed (works at any state).
+                if state.checkpoint_n > local_n and state.checkpoint_revision:
+                    logger.info(
+                        "checkpoint pull: local_n=%d → remote_n=%d revision=%s",
+                        local_n, state.checkpoint_n,
+                        (state.checkpoint_revision or "")[:12],
+                    )
                 try:
                     local_n, local_hash, self.hf_model = await maybe_pull_checkpoint(
                         state=state, local_n=local_n, local_hash=local_hash,
@@ -237,31 +508,129 @@ class MiningEngine:
                     logger.exception("checkpoint pull failed; keeping local")
 
                 if state.state != WindowState.OPEN:
+                    logger.debug(
+                        "state=%s (not OPEN) window_n=%d — waiting",
+                        state.state.value if hasattr(state.state, "value") else state.state,
+                        state.window_n,
+                    )
                     await asyncio.sleep(1)
+                    continue
+
+                # Window transition: emit rolling summary + reset prompt
+                # selection signal (don't reset stats; they're cross-window).
+                if last_window_n != state.window_n:
+                    if last_window_n is not None:
+                        logger.info(
+                            "window %d → %d | %s",
+                            last_window_n, state.window_n, self._metrics.summary(),
+                        )
+                    else:
+                        logger.info(
+                            "first OPEN window window_n=%d valid_so_far=%d "
+                            "cooldown_prompts=%d checkpoint_n=%d",
+                            state.window_n, state.valid_submissions,
+                            len(state.cooldown_prompts), state.checkpoint_n,
+                        )
+                    last_window_n = state.window_n
+
+                # Per-window randomness: the validator re-derives the GRAIL
+                # sketch seed from block_hash(state.window_n) for each window,
+                # so the miner MUST match that or every submission GRAIL-fails.
+                try:
+                    randomness = await self._randomness_for_window(
+                        subtensor, state.window_n, use_drand
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to derive randomness for window %d; retrying",
+                        state.window_n,
+                    )
+                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
                 # Pick prompt, generate, submit.
                 cooldown_set = set(state.cooldown_prompts)
                 try:
-                    prompt_idx = pick_prompt_idx(self.env, cooldown_set, rng=rng)
+                    prompt_idx = pick_prompt_idx(
+                        self.env, cooldown_set,
+                        rng=rng, stats=self._prompt_stats,
+                    )
                 except RuntimeError:
-                    logger.info("env fully in cooldown; sleeping")
+                    logger.info(
+                        "env fully in cooldown (cooldown_set=%d / env_len=%d); sleeping",
+                        len(cooldown_set), len(self.env),
+                    )
                     await asyncio.sleep(5)
                     continue
 
                 problem = self.env.get_problem(prompt_idx)
+                a, b = self._prompt_stats.posterior(prompt_idx)
+                p_hat = self._prompt_stats.mean_p(prompt_idx)
+                attempts = self._prompt_stats.attempts(prompt_idx)
+                logger.debug(
+                    "pick prompt=%d posterior=Beta(%.1f,%.1f) p_hat=%.2f "
+                    "attempts=%d zone_p=%.2f problem_id=%s",
+                    prompt_idx, a, b, p_hat, attempts,
+                    _zone_probability(p_hat), problem.get("id", "?"),
+                )
+
+                t_gen = time.monotonic()
                 generations = self._generate_m_rollouts(problem, randomness)
+                gen_ms = (time.monotonic() - t_gen) * 1000.0
                 if len(generations) < M_ROLLOUTS:
                     logger.warning(
-                        "generated %d/%d for prompt %d; skipping",
-                        len(generations), M_ROLLOUTS, prompt_idx,
+                        "generated %d/%d for prompt %d (gen_ms=%.0f); skipping",
+                        len(generations), M_ROLLOUTS, prompt_idx, gen_ms,
                     )
                     continue
 
+                t_proof = time.monotonic()
                 rollout_submissions = [
                     self._build_rollout_submission(gen, problem, randomness)
                     for gen in generations
                 ]
+                proof_ms = (time.monotonic() - t_proof) * 1000.0
+
+                rewards = [r.reward for r in rollout_submissions]
+                sigma, k_solved, in_zone = _zone_status(rewards)
+
+                completion_lens = [
+                    len(r.tokens) - r.commit["rollout"]["prompt_length"]
+                    for r in rollout_submissions
+                ]
+                # Update the posterior BEFORE the submission round-trip so
+                # the signal updates even when /submit fails. completion_lens
+                # feeds the SUPERSEDED-race tiebreak in pick_prompt_idx.
+                self._prompt_stats.record_group(
+                    prompt_idx, rewards, completion_lens=completion_lens,
+                )
+                logger.info(
+                    "rollouts ready window=%d prompt=%d k=%d/%d sigma=%.3f "
+                    "in_zone=%s gen_ms=%.0f proof_ms=%.0f completion_len[min/med/max]=%d/%d/%d",
+                    state.window_n, prompt_idx, k_solved, M_ROLLOUTS, sigma, in_zone,
+                    gen_ms, proof_ms,
+                    min(completion_lens),
+                    sorted(completion_lens)[len(completion_lens) // 2],
+                    max(completion_lens),
+                )
+
+                # Local short-circuit: if our own rewards distribution can't
+                # clear the validator's zone gate, skip the HTTP round-trip
+                # entirely — the verdict is deterministic OUT_OF_ZONE and we
+                # save bandwidth + lose less ground on the SUPERSEDED race
+                # for the next prompt. Bootstrap-window's relaxed threshold
+                # is ignored here intentionally; the steady-state cost of
+                # the extra check is one submission per ~100 windows.
+                if not in_zone:
+                    self._metrics.record_local_oos()
+                    logger.info(
+                        "local OUT_OF_ZONE (sigma=%.3f < %.2f) prompt=%d k=%d/%d — skipping submit",
+                        sigma, SIGMA_MIN, prompt_idx, k_solved, M_ROLLOUTS,
+                    )
+                    if (self._metrics.submitted + self._metrics.local_out_of_zone) % _SUMMARY_EVERY == 0:
+                        logger.info("metrics | %s", self._metrics.summary())
+                    continue
+
                 merkle_root = _compute_merkle_root(rollout_submissions)
 
                 request = BatchSubmissionRequest(
@@ -272,16 +641,34 @@ class MiningEngine:
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
                 )
+                t_http = time.monotonic()
                 try:
                     resp = await submit_batch_v2(url, request, client=client)
-                    logger.info(
-                        "submitted window=%d prompt=%d accepted=%s reason=%s",
-                        state.window_n, prompt_idx, resp.accepted,
-                        resp.reason.value if hasattr(resp.reason, "value") else resp.reason,
+                    http_ms = (time.monotonic() - t_http) * 1000.0
+                    reason_str = (
+                        resp.reason.value if hasattr(resp.reason, "value")
+                        else str(resp.reason)
+                    )
+                    self._metrics.record(resp.accepted, reason_str)
+                    log_fn = logger.info if resp.accepted else logger.warning
+                    log_fn(
+                        "submit window=%d prompt=%d k=%d/%d sigma=%.3f "
+                        "merkle=%s gen_ms=%.0f proof_ms=%.0f http_ms=%.0f "
+                        "accepted=%s reason=%s",
+                        state.window_n, prompt_idx, k_solved, M_ROLLOUTS, sigma,
+                        merkle_root[:12], gen_ms, proof_ms, http_ms,
+                        resp.accepted, reason_str,
                     )
                     results.append(resp)
                 except SubmissionError as exc:
-                    logger.error("submit failed: %s", exc)
+                    self._metrics.record_network_error()
+                    logger.error(
+                        "submit network/4xx failure window=%d prompt=%d: %s",
+                        state.window_n, prompt_idx, exc,
+                    )
+
+                if self._metrics.submitted and self._metrics.submitted % _SUMMARY_EVERY == 0:
+                    logger.info("metrics | %s", self._metrics.summary())
 
         return results
 
@@ -424,6 +811,31 @@ class MiningEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def _randomness_for_window(
+        self, subtensor, window_n: int, use_drand: bool
+    ) -> str:
+        """Return cached randomness for *window_n*, deriving it on first miss.
+
+        The validator computes its per-window GRAIL seed from
+        ``compute_window_randomness(block_hash(window_n), drand[...])`` and
+        the miner must match bit-for-bit or every commitment fails. We
+        cache the derived value so each window incurs at most one chain
+        round-trip even though the outer polling loop ticks multiple times
+        per window.
+        """
+        if self._cached_window_n == window_n and self._cached_randomness:
+            return self._cached_randomness
+        t = time.monotonic()
+        randomness = await self._compute_randomness(subtensor, window_n, use_drand)
+        chain_ms = (time.monotonic() - t) * 1000.0
+        self._cached_window_n = window_n
+        self._cached_randomness = randomness
+        logger.info(
+            "randomness derived window_n=%d randomness=%s... chain_ms=%.0f use_drand=%s",
+            window_n, randomness[:16], chain_ms, use_drand,
+        )
+        return randomness
 
     async def _compute_randomness(
         self, subtensor, window_start: int, use_drand: bool
