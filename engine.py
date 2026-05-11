@@ -93,6 +93,14 @@ _PROBE_SIZE = 3
 # posterior is barely shifted.
 _PROBE_ABORT_THRESHOLD = 0.30
 
+# Skip the probe entirely once a prompt has been attempted this many times.
+# The picker chose a warm prompt because its posterior says it's mid-difficulty
+# (high zone_p) — re-verifying with a probe is pure overhead because two
+# sequential ``.generate()`` calls (3 then 5) take longer than one batched
+# call of 8 due to poor GPU re-use across kernel launches. The probe is only
+# valuable on cold prompts where it can short-circuit the abort path.
+_PROBE_WARM_THRESHOLD = 5
+
 # Default location for the on-disk posterior cache. Resolved at engine
 # construction; the miner can override via the ``stats_path`` kwarg (set to
 # ``None`` to disable persistence).
@@ -818,94 +826,103 @@ class MiningEngine:
                     _zone_probability(p_hat), problem.get("id", "?"),
                 )
 
-                # Cold-start probe. Generate _PROBE_SIZE rollouts first,
-                # decide whether to fill out the group based on how many
-                # solved. If k_probe is 0 or _PROBE_SIZE the prompt is
-                # structurally extreme and the remaining rollouts are very
-                # likely to also land out-of-zone — skip them and recoup
-                # ~60% of the generation cost. The probe rollouts still
-                # update the Beta posterior so future picks are informed.
-                t_probe = time.monotonic()
-                probe_gens = self._generate_n_rollouts(problem, _PROBE_SIZE)
-                probe_ms = (time.monotonic() - t_probe) * 1000.0
-                if len(probe_gens) < _PROBE_SIZE:
-                    logger.warning(
-                        "probe generated %d/%d for prompt %d (probe_ms=%.0f); skipping",
-                        len(probe_gens), _PROBE_SIZE, prompt_idx, probe_ms,
+                # Probe-or-full decision: cold prompts use the probe so we
+                # can short-circuit on extreme observations; warm prompts
+                # (≥ _PROBE_WARM_THRESHOLD attempts) skip the probe because
+                # the picker already trusts the posterior and the split
+                # batch (3 then 5) takes longer than one batch of 8 due to
+                # poor GPU re-use across two kernel launches.
+                if attempts >= _PROBE_WARM_THRESHOLD:
+                    logger.debug(
+                        "skip probe (warm) prompt=%d attempts=%d ≥ %d",
+                        prompt_idx, attempts, _PROBE_WARM_THRESHOLD,
                     )
-                    continue
-
-                probe_scored = [self._score_rollout(g, problem) for g in probe_gens]
-                probe_rewards = [r for r, _ in probe_scored]
-                probe_lens = [length for _, length in probe_scored]
-                k_probe = sum(1 for r in probe_rewards if r >= 0.5)
-
-                # Bayesian abort: combine the prior Beta posterior with the
-                # probe observations to get a posterior mean, then ask whether
-                # the remaining ``M - _PROBE_SIZE`` rollouts at that solve rate
-                # still have a reasonable chance of finishing in-zone. This
-                # generalizes the old hardcoded ``k_probe ∈ {0, _PROBE_SIZE}``
-                # rule: an unseen prompt that probes 3/3 has posterior mean
-                # p̂≈0.8 and continuation probability ≈0.27 → abort, but a
-                # warm mid-prompt that happens to probe 3/3 has posterior
-                # barely shifted from p̂≈0.5 and continuation probability ≈0.73
-                # → continue (the old rule would have wastefully aborted).
-                a_prior, b_prior = self._prompt_stats.posterior(prompt_idx)
-                a_post = a_prior + k_probe
-                b_post = b_prior + (_PROBE_SIZE - k_probe)
-                p_hat_post = a_post / (a_post + b_post)
-                n_more = M_ROLLOUTS - _PROBE_SIZE
-                p_continue_zone = _continuation_in_zone_probability(
-                    k_probe, p_hat_post, n_more,
-                )
-
-                if p_continue_zone < _PROBE_ABORT_THRESHOLD:
-                    # Predicted continuation probability too low — abort.
-                    # Record probe outcomes so the posterior moves toward
-                    # the observed rate (informative for future picks).
-                    self._prompt_stats.record_group(
-                        prompt_idx, probe_rewards, completion_lens=probe_lens,
-                    )
-                    self._metrics.record_probe(k_probe, aborted=True)
-                    logger.info(
-                        "probe abort window=%d prompt=%d k_probe=%d/%d "
-                        "p_hat=%.2f p_continue_zone=%.2f probe_ms=%.0f "
-                        "(saved %d rollouts)",
-                        state.window_n, prompt_idx, k_probe, _PROBE_SIZE,
-                        p_hat_post, p_continue_zone, probe_ms,
-                        M_ROLLOUTS - _PROBE_SIZE,
-                    )
-                    self._maybe_persist_stats()
-                    if self._metrics.probe_attempts % _SUMMARY_EVERY == 0:
-                        logger.info(
-                            "metrics | %s",
-                            self._metrics.summary(self._prompt_stats),
+                    t_gen = time.monotonic()
+                    generations = self._generate_n_rollouts(problem, M_ROLLOUTS)
+                    gen_ms = (time.monotonic() - t_gen) * 1000.0
+                    probe_ms = 0.0
+                    more_ms = gen_ms
+                    if len(generations) < M_ROLLOUTS:
+                        logger.warning(
+                            "generated %d/%d for prompt %d (gen_ms=%.0f); skipping",
+                            len(generations), M_ROLLOUTS, prompt_idx, gen_ms,
                         )
-                    continue
+                        continue
+                else:
+                    # Cold-start probe. Generate _PROBE_SIZE rollouts first,
+                    # decide whether to fill out the group based on the
+                    # Bayesian posterior-predictive in-zone probability.
+                    t_probe = time.monotonic()
+                    probe_gens = self._generate_n_rollouts(problem, _PROBE_SIZE)
+                    probe_ms = (time.monotonic() - t_probe) * 1000.0
+                    if len(probe_gens) < _PROBE_SIZE:
+                        logger.warning(
+                            "probe generated %d/%d for prompt %d (probe_ms=%.0f); skipping",
+                            len(probe_gens), _PROBE_SIZE, prompt_idx, probe_ms,
+                        )
+                        continue
 
-                # Probe wasn't extreme — fill out the group.
-                logger.debug(
-                    "probe continue prompt=%d k_probe=%d/%d p_hat=%.2f "
-                    "p_continue_zone=%.2f",
-                    prompt_idx, k_probe, _PROBE_SIZE,
-                    p_hat_post, p_continue_zone,
-                )
-                self._metrics.record_probe(k_probe, aborted=False)
-                t_more = time.monotonic()
-                more_gens = self._generate_n_rollouts(
-                    problem, M_ROLLOUTS - _PROBE_SIZE
-                )
-                more_ms = (time.monotonic() - t_more) * 1000.0
-                gen_ms = probe_ms + more_ms
-                if len(more_gens) < M_ROLLOUTS - _PROBE_SIZE:
-                    logger.warning(
-                        "continuation generated %d/%d for prompt %d "
-                        "(gen_ms=%.0f); skipping",
-                        len(more_gens), M_ROLLOUTS - _PROBE_SIZE,
-                        prompt_idx, gen_ms,
+                    probe_scored = [self._score_rollout(g, problem) for g in probe_gens]
+                    probe_rewards = [r for r, _ in probe_scored]
+                    probe_lens = [length for _, length in probe_scored]
+                    k_probe = sum(1 for r in probe_rewards if r >= 0.5)
+
+                    a_prior, b_prior = self._prompt_stats.posterior(prompt_idx)
+                    a_post = a_prior + k_probe
+                    b_post = b_prior + (_PROBE_SIZE - k_probe)
+                    p_hat_post = a_post / (a_post + b_post)
+                    n_more = M_ROLLOUTS - _PROBE_SIZE
+                    p_continue_zone = _continuation_in_zone_probability(
+                        k_probe, p_hat_post, n_more,
                     )
-                    continue
-                generations = probe_gens + more_gens
+
+                    if p_continue_zone < _PROBE_ABORT_THRESHOLD:
+                        # Predicted continuation probability too low — abort.
+                        # Record probe outcomes so the posterior moves toward
+                        # the observed rate (informative for future picks).
+                        self._prompt_stats.record_group(
+                            prompt_idx, probe_rewards, completion_lens=probe_lens,
+                        )
+                        self._metrics.record_probe(k_probe, aborted=True)
+                        logger.info(
+                            "probe abort window=%d prompt=%d k_probe=%d/%d "
+                            "p_hat=%.2f p_continue_zone=%.2f probe_ms=%.0f "
+                            "(saved %d rollouts)",
+                            state.window_n, prompt_idx, k_probe, _PROBE_SIZE,
+                            p_hat_post, p_continue_zone, probe_ms,
+                            M_ROLLOUTS - _PROBE_SIZE,
+                        )
+                        self._maybe_persist_stats()
+                        if self._metrics.probe_attempts % _SUMMARY_EVERY == 0:
+                            logger.info(
+                                "metrics | %s",
+                                self._metrics.summary(self._prompt_stats),
+                            )
+                        continue
+
+                    # Probe wasn't extreme — fill out the group.
+                    logger.debug(
+                        "probe continue prompt=%d k_probe=%d/%d p_hat=%.2f "
+                        "p_continue_zone=%.2f",
+                        prompt_idx, k_probe, _PROBE_SIZE,
+                        p_hat_post, p_continue_zone,
+                    )
+                    self._metrics.record_probe(k_probe, aborted=False)
+                    t_more = time.monotonic()
+                    more_gens = self._generate_n_rollouts(
+                        problem, M_ROLLOUTS - _PROBE_SIZE
+                    )
+                    more_ms = (time.monotonic() - t_more) * 1000.0
+                    gen_ms = probe_ms + more_ms
+                    if len(more_gens) < M_ROLLOUTS - _PROBE_SIZE:
+                        logger.warning(
+                            "continuation generated %d/%d for prompt %d "
+                            "(gen_ms=%.0f); skipping",
+                            len(more_gens), M_ROLLOUTS - _PROBE_SIZE,
+                            prompt_idx, gen_ms,
+                        )
+                        continue
+                    generations = probe_gens + more_gens
 
                 t_proof = time.monotonic()
                 rollout_submissions = [
@@ -958,6 +975,36 @@ class MiningEngine:
                     continue
 
                 merkle_root = _compute_merkle_root(rollout_submissions)
+
+                # Pre-submit state check: if generation took long enough that
+                # the validator's window advanced (windows seal at B valid
+                # submissions, typically every ~2-3 min), our request is born
+                # doomed — the validator will return 409 / WINDOW_MISMATCH and
+                # we'll have wasted both the long POST round-trip (the
+                # validator queues submissions behind GRAIL verifications) and
+                # the time we could have spent generating for the new window.
+                # A cheap GET /state here catches this case explicitly and
+                # bails before the doomed POST. Tradeoff: ~20s extra per
+                # attempt vs. ~80s saved per doomed attempt. Net positive
+                # whenever generation is slower than the window cycle.
+                try:
+                    fresh_state = await get_window_state_v2(url, client=client)
+                    if fresh_state.window_n != state.window_n:
+                        logger.warning(
+                            "window advanced %d → %d during generation "
+                            "(gen_ms=%.0f) — skipping doomed submit for prompt=%d",
+                            state.window_n, fresh_state.window_n,
+                            gen_ms, prompt_idx,
+                        )
+                        continue
+                except SubmissionError as e:
+                    # State endpoint refused (503 / 4xx) — proceed and let
+                    # the actual /submit return the canonical verdict. Not
+                    # worth bailing on a state poll glitch.
+                    logger.debug(
+                        "pre-submit state check failed: %s; proceeding with submit",
+                        e,
+                    )
 
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
@@ -1094,6 +1141,23 @@ class MiningEngine:
         )
         prompt_length = len(prompt_tokens)
 
+        # Dynamic max_new_tokens budget. The validator accepts max-length
+        # termination iff ``prompt_length + completion_length >=
+        # MAX_NEW_TOKENS_PROTOCOL_CAP`` ([verifier.py:90-91]). So we only
+        # need to allow enough completion tokens that hitting the cap also
+        # satisfies that inequality — anything beyond ``cap - prompt_length``
+        # is wasted compute on the same termination outcome. For typical
+        # 500-2000 token math prompts this saves 500-2000 tokens × 8
+        # rollouts per attempt (~3-13s per attempt at typical throughput).
+        # ``self.max_new_tokens`` (the constructor cap) is still honored as
+        # an upper bound — set lower to deliberately risk BAD_TERMINATION
+        # for further savings.
+        budget = max(
+            512,  # floor: ensure rollouts have meaningful generation room
+            MAX_NEW_TOKENS_PROTOCOL_CAP - prompt_length,
+        )
+        effective_max_new = min(self.max_new_tokens, budget)
+
         with torch.no_grad():
             input_tensor = torch.tensor(
                 [prompt_tokens] * n,
@@ -1101,7 +1165,7 @@ class MiningEngine:
             )
             outputs = self.vllm_model.generate(
                 input_tensor,
-                max_new_tokens=self.max_new_tokens,
+                max_new_tokens=effective_max_new,
                 do_sample=True,
                 temperature=T_PROTO,
                 top_p=TOP_P_PROTO,
