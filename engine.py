@@ -359,6 +359,40 @@ class MiningEngine:
                 sigma_obs = statistics.pstdev(rewards_list)
                 self._record_sigma(prompt_idx, sigma_obs, local_n)
 
+                # Pre-submit freshness check: generation took 10s–200s+; in
+                # that time the window may have sealed (→ window_not_active /
+                # window_mismatch reject) or the validator may have bounced
+                # (→ HTTP submit hangs until our 10s wait_for fires). A cheap
+                # /state poll with a 3s ceiling catches both cases and lets
+                # us skip a doomed submit before it ties up the loop.
+                try:
+                    fresh_state = await asyncio.wait_for(
+                        get_window_state_v2(url, client=client),
+                        timeout=3.0,
+                    )
+                    stale = (
+                        fresh_state.state != WindowState.OPEN
+                        or fresh_state.window_n != state.window_n
+                    )
+                    if stale:
+                        logger.warning(
+                            "skip stale submit window=%d prompt=%d rewards=%s "
+                            "sigma_obs=%.3f (validator window=%d state=%s)",
+                            state.window_n, prompt_idx, rewards_list, sigma_obs,
+                            fresh_state.window_n, fresh_state.state.value
+                            if hasattr(fresh_state.state, "value")
+                            else fresh_state.state,
+                        )
+                        continue
+                except (asyncio.TimeoutError, SubmissionError, Exception) as exc:
+                    logger.warning(
+                        "skip submit window=%d prompt=%d rewards=%s sigma_obs=%.3f "
+                        "(/state check failed: %s)",
+                        state.window_n, prompt_idx, rewards_list, sigma_obs,
+                        type(exc).__name__,
+                    )
+                    continue
+
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
                     prompt_idx=prompt_idx,
