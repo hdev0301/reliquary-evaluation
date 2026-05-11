@@ -861,11 +861,16 @@ class MiningEngine:
                 a, b = self._prompt_stats.posterior(prompt_idx)
                 p_hat = self._prompt_stats.mean_p(prompt_idx)
                 attempts = self._prompt_stats.attempts(prompt_idx)
-                logger.debug(
-                    "pick prompt=%d posterior=Beta(%.1f,%.1f) p_hat=%.2f "
-                    "attempts=%d zone_p=%.2f problem_id=%s",
+                # INFO-level pick log so an operator can see prompt
+                # progression without flipping the whole loop to DEBUG.
+                # Surfaces the picker's posterior so we can correlate
+                # which prompt is being attempted with the subsequent
+                # vllm.generate begin/done timings.
+                logger.info(
+                    "picked prompt=%d posterior=Beta(%.1f,%.1f) p_hat=%.2f "
+                    "attempts=%d zone_p=%.2f",
                     prompt_idx, a, b, p_hat, attempts,
-                    _zone_probability(p_hat), problem.get("id", "?"),
+                    _zone_probability(p_hat),
                 )
 
                 # Probe-or-full decision: cold prompts use the probe so we
@@ -966,12 +971,26 @@ class MiningEngine:
                         continue
                     generations = probe_gens + more_gens
 
+                # Stage marker so we can see in the log whether proof
+                # construction is the next slow step after generation.
+                # The HF forward in _build_grail_commit runs serially per
+                # rollout, so for M_ROLLOUTS=8 we do 8 forward passes
+                # against the HF proof model. Should be ~3-5s total on
+                # H200; if it takes much longer, GRAIL/HF is the bottleneck.
+                logger.info(
+                    "building GRAIL proofs window=%d prompt=%d rollouts=%d",
+                    state.window_n, prompt_idx, len(generations),
+                )
                 t_proof = time.monotonic()
                 rollout_submissions = [
                     self._build_rollout_submission(gen, problem, randomness)
                     for gen in generations
                 ]
                 proof_ms = (time.monotonic() - t_proof) * 1000.0
+                logger.info(
+                    "GRAIL proofs done window=%d prompt=%d proof_ms=%.0f",
+                    state.window_n, prompt_idx, proof_ms,
+                )
 
                 rewards = [r.reward for r in rollout_submissions]
                 sigma, k_solved, in_zone = _zone_status(rewards)

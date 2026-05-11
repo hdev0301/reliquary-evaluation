@@ -253,7 +253,14 @@ class VLLMAdapter:
         right-padded with ``pad_token_id`` so per-row slicing
         (``outputs[i].tolist()[prompt_length:]``) works unchanged in the
         engine.
+
+        Emits start/end INFO logs around the vLLM call itself with
+        timing + token counts. The vLLM call is the longest single
+        operation in the miner pipeline (10–60s typical) and emits no
+        progress output of its own (``use_tqdm=False``), so without
+        these markers the loop appears to hang for the entire duration.
         """
+        import time
         import torch
         from vllm import SamplingParams
 
@@ -280,13 +287,35 @@ class VLLMAdapter:
             max_tokens=int(max_new_tokens),
         )
 
+        logger.info(
+            "vllm.generate begin n=%d prompt_len=%d max_new_tokens=%d "
+            "temperature=%.2f top_p=%.2f top_k=%d",
+            n, len(prompt_tokens), max_new_tokens,
+            temperature, top_p, vllm_top_k,
+        )
+        t0 = time.monotonic()
         outputs = self._llm.generate(
             prompt_token_ids=[prompt_tokens],
             sampling_params=params,
             use_tqdm=False,
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+
         # outputs is list[RequestOutput] with one element (one prompt).
         request_output = outputs[0]
+        gen_lens = [len(c.token_ids) for c in request_output.outputs]
+        finish_reasons = [c.finish_reason for c in request_output.outputs]
+        total_tokens = sum(gen_lens)
+        toks_per_sec = (
+            total_tokens / (elapsed_ms / 1000.0)
+            if elapsed_ms > 0 else 0.0
+        )
+        logger.info(
+            "vllm.generate done n=%d elapsed_ms=%.0f total_tokens=%d "
+            "throughput=%.0f tok/s gen_lens=%s finish=%s",
+            n, elapsed_ms, total_tokens, toks_per_sec,
+            gen_lens, finish_reasons,
+        )
 
         # Reconstruct (n, seq_len) tensor with right-padding so the
         # engine's per-row EOS slicing works unchanged.
