@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import statistics
 import time
+from collections import deque
 from typing import TYPE_CHECKING
 
 import random as _random
@@ -106,6 +108,31 @@ def pick_prompt_idx(
     return rng.choice(eligible)
 
 
+def _has_complete_boxed(text: str) -> bool:
+    """True iff ``text`` contains a balanced ``\\boxed{...}`` or ``\\fbox{...}``.
+
+    Mirrors the brace-walk in ``reliquary.environment.math._last_boxed_only_string``
+    so that we stop generation at exactly the point the env's reward extractor
+    would have a scoreable answer — nothing more.
+    """
+    for marker in ("\\boxed{", "\\fbox{"):
+        idx = text.rfind(marker)
+        if idx < 0:
+            continue
+        depth = 1
+        j = idx + len(marker)
+        while j < len(text):
+            c = text[j]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return True
+            j += 1
+    return False
+
+
 def _compute_merkle_root(rollouts) -> str:
     """Compute Merkle root over rollout leaves — returns 64-char hex.
 
@@ -168,6 +195,17 @@ class MiningEngine:
 
         self._hidden_dim = resolve_hidden_size(hf_model)
         self._verifier = GRAILVerifier(hidden_dim=self._hidden_dim)
+
+        # Per-prompt σ memory for frontier-band selection. Cleared on every
+        # checkpoint advance because the policy has shifted and old σ
+        # observations no longer predict the new in-zone band.
+        self._prompt_sigma_history: dict[int, deque] = {}
+        self._stats_checkpoint_n: int = -1
+        self._STATS_MAXLEN = 5
+        self._STATS_MIN_OBS = 2
+        self._SIGMA_THRESHOLD = 0.43
+        self._EXPLORE_RATE = 0.20
+        self._MIN_FRONTIER_POOL = 10
 
     # ------------------------------------------------------------------
     # Public API
@@ -243,14 +281,27 @@ class MiningEngine:
                 # Pick prompt, generate, submit.
                 cooldown_set = set(state.cooldown_prompts)
                 try:
-                    prompt_idx = pick_prompt_idx(self.env, cooldown_set, rng=rng)
+                    prompt_idx, pick_mode, pick_sigma, pick_pool = (
+                        self._pick_prompt_idx_smart(cooldown_set, local_n, rng)
+                    )
                 except RuntimeError:
                     logger.info("env fully in cooldown; sleeping")
                     await asyncio.sleep(5)
                     continue
 
+                logger.info(
+                    "pick window=%d prompt=%d mode=%s mean_sigma=%s pool=%d ckpt_n=%d",
+                    state.window_n, prompt_idx, pick_mode,
+                    f"{pick_sigma:.3f}" if pick_sigma is not None else "n/a",
+                    pick_pool, local_n,
+                )
+
                 problem = self.env.get_problem(prompt_idx)
+
+                t_gen_start = time.perf_counter()
                 generations = self._generate_m_rollouts(problem, randomness)
+                t_gen_ms = int((time.perf_counter() - t_gen_start) * 1000)
+
                 if len(generations) < M_ROLLOUTS:
                     logger.warning(
                         "generated %d/%d for prompt %d; skipping",
@@ -258,11 +309,16 @@ class MiningEngine:
                     )
                     continue
 
+                t_proof_start = time.perf_counter()
                 rollout_submissions = [
                     self._build_rollout_submission(gen, problem, randomness)
                     for gen in generations
                 ]
                 merkle_root = _compute_merkle_root(rollout_submissions)
+                t_proof_ms = int((time.perf_counter() - t_proof_start) * 1000)
+
+                sigma_obs = statistics.pstdev([r.reward for r in rollout_submissions])
+                self._record_sigma(prompt_idx, sigma_obs, local_n)
 
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
@@ -272,16 +328,41 @@ class MiningEngine:
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
                 )
+                t_submit_start = time.perf_counter()
                 try:
-                    resp = await submit_batch_v2(url, request, client=client)
+                    # Hard outer ceiling: submitter.py retries 3× with 60s
+                    # per-attempt timeout, so a hung connection (e.g. window
+                    # already sealed under load) can burn ~180s. We cap the
+                    # whole retry loop at 10s so the engine moves on to the
+                    # next window instead of starving on a doomed submission.
+                    resp = await asyncio.wait_for(
+                        submit_batch_v2(url, request, client=client),
+                        timeout=10.0,
+                    )
+                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
+                    reason_str = (
+                        resp.reason.value if hasattr(resp.reason, "value") else resp.reason
+                    )
                     logger.info(
-                        "submitted window=%d prompt=%d accepted=%s reason=%s",
-                        state.window_n, prompt_idx, resp.accepted,
-                        resp.reason.value if hasattr(resp.reason, "value") else resp.reason,
+                        "submit window=%d prompt=%d accepted=%s reason=%s "
+                        "sigma_obs=%.3f gen_ms=%d proof_ms=%d submit_ms=%d total_ms=%d",
+                        state.window_n, prompt_idx, resp.accepted, reason_str,
+                        sigma_obs, t_gen_ms, t_proof_ms, t_submit_ms,
+                        t_gen_ms + t_proof_ms + t_submit_ms,
                     )
                     results.append(resp)
+                except asyncio.TimeoutError:
+                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
+                    logger.error(
+                        "submit window=%d prompt=%d timeout submit_ms=%d sigma_obs=%.3f (abandoned)",
+                        state.window_n, prompt_idx, t_submit_ms, sigma_obs,
+                    )
                 except SubmissionError as exc:
-                    logger.error("submit failed: %s", exc)
+                    t_submit_ms = int((time.perf_counter() - t_submit_start) * 1000)
+                    logger.error(
+                        "submit window=%d prompt=%d error submit_ms=%d sigma_obs=%.3f: %s",
+                        state.window_n, prompt_idx, t_submit_ms, sigma_obs, exc,
+                    )
 
         return results
 
@@ -370,11 +451,36 @@ class MiningEngine:
         "generate" in the usual sense.
         """
         import torch
+        from transformers import StoppingCriteria, StoppingCriteriaList
 
         prompt_tokens = self.tokenizer.encode(
             problem["prompt"], add_special_tokens=False
         )
         prompt_length = len(prompt_tokens)
+
+        # Stop as soon as every sample in the batch has emitted a balanced
+        # \boxed{...} (or \fbox{...}). Without this, Qwen3-4B-Instruct often
+        # rambles to max_new_tokens on MATH problems and never produces a
+        # scoreable answer → σ=0 / OUT_OF_ZONE. Check every 16 steps to keep
+        # decode overhead under ~1 % of step time.
+        tokenizer = self.tokenizer
+
+        class _BoxedComplete(StoppingCriteria):
+            def __init__(self):
+                self._step = 0
+                self._done = [False] * M_ROLLOUTS
+
+            def __call__(self, input_ids, scores, **kwargs):
+                self._step += 1
+                if self._step % 16 != 0:
+                    return False
+                for i in range(input_ids.shape[0]):
+                    if self._done[i]:
+                        continue
+                    new_tokens = input_ids[i, prompt_length:].tolist()
+                    if _has_complete_boxed(tokenizer.decode(new_tokens)):
+                        self._done[i] = True
+                return all(self._done)
 
         with torch.no_grad():
             input_tensor = torch.tensor(
@@ -389,6 +495,7 @@ class MiningEngine:
                 top_p=TOP_P_PROTO,
                 top_k=TOP_K_PROTO,
                 pad_token_id=self.tokenizer.pad_token_id,
+                stopping_criteria=StoppingCriteriaList([_BoxedComplete()]),
             )
         eos = self.tokenizer.eos_token_id
         rollouts = []
@@ -505,3 +612,50 @@ class MiningEngine:
                 "token_logprobs": token_logprobs,
             },
         }
+
+    def _reset_stats_if_stale(self, local_n: int) -> None:
+        if local_n != self._stats_checkpoint_n:
+            self._prompt_sigma_history.clear()
+            self._stats_checkpoint_n = local_n
+
+    def _record_sigma(self, prompt_idx: int, sigma_obs: float, local_n: int) -> None:
+        self._reset_stats_if_stale(local_n)
+        hist = self._prompt_sigma_history.get(prompt_idx)
+        if hist is None:
+            hist = deque(maxlen=self._STATS_MAXLEN)
+            self._prompt_sigma_history[prompt_idx] = hist
+        hist.append(sigma_obs)
+
+    def _pick_prompt_idx_smart(
+        self,
+        cooldown_set: set[int],
+        local_n: int,
+        rng: _random.Random,
+    ) -> tuple[int, str, float | None, int]:
+        """Frontier-band picker with ε-exploration.
+
+        Returns ``(prompt_idx, mode, mean_sigma_or_None, pool_size)``. Mode
+        is one of ``"explore"`` (ε-coin), ``"exploit"`` (frontier sample),
+        or ``"fallback"`` (pool too small).
+        """
+        self._reset_stats_if_stale(local_n)
+
+        if rng.random() < self._EXPLORE_RATE:
+            return pick_prompt_idx(self.env, cooldown_set, rng=rng), "explore", None, 0
+
+        candidates: list[int] = []
+        weights: list[float] = []
+        for idx, hist in self._prompt_sigma_history.items():
+            if idx in cooldown_set or len(hist) < self._STATS_MIN_OBS:
+                continue
+            mean_sigma = sum(hist) / len(hist)
+            if mean_sigma >= self._SIGMA_THRESHOLD:
+                candidates.append(idx)
+                weights.append(mean_sigma)
+
+        pool_size = len(candidates)
+        if pool_size >= self._MIN_FRONTIER_POOL:
+            chosen = rng.choices(candidates, weights=weights, k=1)[0]
+            chosen_mean = weights[candidates.index(chosen)]
+            return chosen, "exploit", chosen_mean, pool_size
+        return pick_prompt_idx(self.env, cooldown_set, rng=rng), "fallback", None, pool_size
