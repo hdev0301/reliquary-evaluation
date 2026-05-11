@@ -1,0 +1,145 @@
+# vLLM-backend dependencies for the reliquary-evaluation miner launcher.
+#
+# READ THE INSTALL INSTRUCTIONS BELOW — do NOT just `pip install -r` this
+# file blindly. The wrong invocation can silently replace your working
+# torch 2.5.1+cu121 with a fresh cu124 build and break flash-attn.
+#
+# ----------------------------------------------------------------------
+# File placement on the miner box (all relative to /root/reliquary/):
+# ----------------------------------------------------------------------
+#
+#   /root/reliquary/
+#   ├── launcher.py                         ← scp here
+#   ├── vllm_adapter.py                     ← scp here
+#   ├── requirements-vllm.txt               ← scp here (this file)
+#   └── reliquary/
+#       └── miner/
+#           └── engine.py                   ← replace with engine-v3.py content
+#
+# One-shot transfer + placement:
+#
+#   # On your dev box:
+#   scp engine-v3.py launcher.py vllm_adapter.py requirements-vllm.txt \
+#       root@<miner-ip>:/root/reliquary/
+#
+#   # On the miner box:
+#   cd /root/reliquary
+#   mv engine-v3.py reliquary/miner/engine.py    # replace upstream engine
+#
+# The stock ``reliquary mine`` CLI keeps working after the engine swap
+# (it just goes through the HF backend); the launcher is what activates
+# the vLLM backend.
+#
+# ----------------------------------------------------------------------
+# Verified compatibility against the user's existing reliquary stack:
+# ----------------------------------------------------------------------
+#   python      3.12.3            (reliquary requires >=3.11; OK)
+#   torch       2.5.1+cu121       (reliquary requires >=2.1.0; OK; vLLM 0.7.x
+#                                  ships wheels built against this exact version)
+#   cuda        12.1              (vLLM 0.7.x has cu121 wheels)
+#   cxx11_abi   False             (matches the flash-attn 2.8.3 wheel we
+#                                  installed earlier — vLLM's cu121 wheel
+#                                  uses the same ABI flag)
+#   transformers >=4.40           (reliquary lower bound; vLLM upgrades to
+#                                  >=4.45 — within reliquary's range, safe)
+#   pydantic    2.x (<3.0)        (reliquary pins <3.0; vLLM stays in 2.x)
+#   bittensor   >=9.0,<10.3       (vLLM doesn't touch this)
+#   flash-attn  2.8.3             (kept for GRAIL proof model — vLLM uses
+#                                  its own attention kernels for generation,
+#                                  the two coexist without conflict)
+#
+# ----------------------------------------------------------------------
+# INSTALL — do this exact sequence on the miner box:
+# ----------------------------------------------------------------------
+#
+# 1. Activate the existing reliquary venv:
+#      source /root/reliquary/.venv/bin/activate
+#
+# 2. Confirm torch is the cu121 build BEFORE touching pip:
+#      python -c "import torch; assert '+cu121' in torch.__version__, torch.__version__; print('OK', torch.__version__)"
+#
+#    If this fails, do NOT proceed. Fix torch first.
+#
+# 3. Install vLLM WITHOUT touching torch. The pinned cu121 wheel URL
+#    comes from vLLM's official release index (uv-style pip index):
+#
+#      pip install vllm==0.7.3 \
+#        --extra-index-url https://download.pytorch.org/whl/cu121 \
+#        --upgrade-strategy only-if-needed
+#
+#    Notes on each flag:
+#      * --extra-index-url cu121: tells pip to prefer cu121-built wheels
+#        for any cuda-bearing dependency (nvidia-*, torch, vllm). Without
+#        this, pip picks the PyPI default which is usually cu124.
+#      * --upgrade-strategy only-if-needed: pip will NOT upgrade torch
+#        unless vLLM explicitly requires a newer version. vLLM 0.7.3 is
+#        built against torch 2.5.1, so no upgrade should be needed.
+#
+# 4. Verify NOTHING got clobbered:
+#      python -c "
+#      import torch, vllm, flash_attn
+#      assert '+cu121' in torch.__version__, torch.__version__
+#      print('torch     :', torch.__version__)
+#      print('vllm      :', vllm.__version__)
+#      print('flash_attn:', flash_attn.__version__)
+#      print('OK — stack intact')
+#      "
+#
+# 5. Smoke-test vLLM can load the validator's published checkpoint:
+#      python -c "
+#      from vllm import LLM, SamplingParams
+#      llm = LLM(model='Qwen/Qwen3-4B-Instruct-2507', dtype='bfloat16',
+#                gpu_memory_utilization=0.55, max_model_len=8192,
+#                enforce_eager=True)
+#      out = llm.generate(prompt_token_ids=[[1,2,3]],
+#                         sampling_params=SamplingParams(n=2, max_tokens=16, temperature=0.9))
+#      print('OK — vLLM produced', sum(len(c.token_ids) for c in out[0].outputs), 'tokens')
+#      "
+#
+# 6. Run the miner via the launcher (NOT via `reliquary mine`):
+#      cd /root/reliquary
+#      python launcher.py \
+#        --network finney --netuid 81 \
+#        --wallet-name ronnywebdev --hotkey hdev0301 \
+#        --checkpoint Qwen/Qwen3-4B-Instruct-2507 \
+#        --validator-url http://86.38.238.30:8080 \
+#        --vllm-gpu 0 --proof-gpu 1 \
+#        --gpu-memory-utilization 0.85 \
+#        --log-level INFO 2>&1 | tee -a ~/miner-vllm.log
+#
+# If step 4 shows torch suddenly went to a cu124 build, or flash_attn
+# import fails with an undefined symbol — that's the same ABI mismatch
+# we already debugged. Recovery:
+#
+#      pip install --force-reinstall \
+#        torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+#      pip install --force-reinstall \
+#        https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl
+#      # then retry the vllm install in step 3
+#
+# ----------------------------------------------------------------------
+# Package list (consumed by pip when --upgrade-strategy=only-if-needed):
+# ----------------------------------------------------------------------
+
+# vLLM pinned exactly. 0.7.3 is the last 0.7.x patch built against torch
+# 2.5.1 + cu121 + py3.12 + cxx11abi=False. 0.8.x requires torch 2.6, which
+# would force a torch upgrade and re-break flash-attn. 0.6.x predates
+# Qwen3 architecture support (added in 0.6.5 / 0.6.6).
+vllm==0.7.3
+
+# DO NOT add `transformers<4.50` here even though it would "fix" the
+# vLLM 0.7.x AttributeError about ``all_special_tokens_extended``. The
+# user's Qwen3-4B model requires ``Qwen3ForCausalLM`` which is only
+# registered with ``AutoModelForCausalLM`` in transformers ≥ 4.51 —
+# downgrading would make the HF proof model load fail with
+# ``Unrecognized configuration class for Qwen3Config``, which is a
+# worse error than the one we're trying to dodge.
+#
+# Instead we ship a runtime shim in ``vllm_adapter.py`` that adds the
+# missing property to ``PreTrainedTokenizer`` at module import. The shim
+# is idempotent and a no-op on older transformers where the attribute
+# already exists, so it survives future transformers ↔ vllm churn in
+# both directions.
+#
+# In summary, keep whatever transformers version reliquary's pip resolver
+# picked (4.51+ in practice for Qwen3 support) — DO NOT touch it.
