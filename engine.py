@@ -216,6 +216,20 @@ class MiningEngine:
         self._level_sigma_history: dict[int, deque] = {}
         # Pre-built level → list[prompt_idx] map, built lazily on first use.
         self._prompts_by_level: dict[int, list[int]] | None = None
+        # Per-(level, subject) bucket σ history. MATH has 7 subjects ×
+        # 5 levels = 35 buckets, ~360 prompts each. Subject difficulty is
+        # orthogonal to level for Qwen3-4B (e.g. it crushes Prealgebra L5
+        # but struggles with Number Theory L3) — the joint prior catches
+        # this where the level-only prior cannot.
+        self._bucket_sigma_history: dict[tuple[int, str], deque] = {}
+        self._prompts_by_bucket: dict[tuple[int, str], list[int]] | None = None
+        # Prompts we've already submitted in the current window — the
+        # validator rejects re-submits of the same prompt within a window
+        # as SUPERSEDED, so picking the same prompt twice (which exploit
+        # mode tends to do when the pool is small) burns 200s of gen on
+        # a guaranteed rejection.
+        self._picked_this_window: set[int] = set()
+        self._last_seen_window: int = -1
         self._stats_checkpoint_n: int = -1
         self._STATS_MAXLEN = 5
         # Single-observation is enough for inclusion: with ~12,500 prompts
@@ -320,7 +334,9 @@ class MiningEngine:
                 cooldown_set = set(state.cooldown_prompts)
                 try:
                     prompt_idx, pick_mode, pick_sigma, pick_pool = (
-                        self._pick_prompt_idx_smart(cooldown_set, local_n, rng)
+                        self._pick_prompt_idx_smart(
+                            cooldown_set, local_n, state.window_n, rng
+                        )
                     )
                 except RuntimeError:
                     logger.info("env fully in cooldown; sleeping")
@@ -712,6 +728,7 @@ class MiningEngine:
             self._prompt_sigma_history.clear()
             self._blacklisted_prompts.clear()
             self._level_sigma_history.clear()
+            self._bucket_sigma_history.clear()
             self._stats_checkpoint_n = local_n
 
     def _get_level(self, prompt_idx: int) -> int | None:
@@ -739,6 +756,33 @@ class MiningEngine:
             self._prompts_by_level = mapping
         return self._prompts_by_level
 
+    def _get_subject(self, prompt_idx: int) -> str | None:
+        """Read the MATH subject (Algebra, Geometry, ...) for a prompt, or
+        None if the underlying dataset doesn't expose it."""
+        dataset = getattr(self.env, "_dataset", None)
+        if dataset is None:
+            return None
+        try:
+            row = dataset[prompt_idx % len(dataset)]
+            subject = row.get("type")
+            if subject is None:
+                return None
+            s = str(subject).strip()
+            return s or None
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def _build_prompts_by_bucket(self) -> dict[tuple[int, str], list[int]]:
+        if self._prompts_by_bucket is None:
+            mapping: dict[tuple[int, str], list[int]] = {}
+            for i in range(len(self.env)):
+                level = self._get_level(i)
+                subject = self._get_subject(i)
+                if level is not None and subject is not None:
+                    mapping.setdefault((level, subject), []).append(i)
+            self._prompts_by_bucket = mapping
+        return self._prompts_by_bucket
+
     def _record_sigma(self, prompt_idx: int, sigma_obs: float, local_n: int) -> None:
         self._reset_stats_if_stale(local_n)
         hist = self._prompt_sigma_history.get(prompt_idx)
@@ -749,30 +793,55 @@ class MiningEngine:
         if sigma_obs < self._SIGMA_THRESHOLD:
             self._blacklisted_prompts.add(prompt_idx)
         level = self._get_level(prompt_idx)
+        subject = self._get_subject(prompt_idx)
         if level is not None:
             level_hist = self._level_sigma_history.get(level)
             if level_hist is None:
                 level_hist = deque(maxlen=50)
                 self._level_sigma_history[level] = level_hist
             level_hist.append(sigma_obs)
+        if level is not None and subject is not None:
+            bucket = (level, subject)
+            bucket_hist = self._bucket_sigma_history.get(bucket)
+            if bucket_hist is None:
+                bucket_hist = deque(maxlen=50)
+                self._bucket_sigma_history[bucket] = bucket_hist
+            bucket_hist.append(sigma_obs)
 
     def _pick_prompt_idx_smart(
         self,
         cooldown_set: set[int],
         local_n: int,
+        window_n: int,
         rng: _random.Random,
     ) -> tuple[int, str, float | None, int]:
         """Frontier-band picker with ε-exploration.
 
         Returns ``(prompt_idx, mode, mean_sigma_or_None, pool_size)``. Mode
         is one of ``"explore"`` (ε-coin), ``"exploit"`` (frontier sample),
-        ``"level_biased"`` (no exploit pool yet but level priors available),
-        or ``"fallback"`` (uniform random). Exclusion set is the union of
-        the validator's cooldown set and our local blacklist.
+        ``"bucket_biased"`` ((level, subject) prior), ``"level_biased"``
+        (level-only prior), or ``"fallback"`` (uniform random). The
+        exclusion set is cooldown ∪ blacklist ∪ already-picked-this-window
+        — the last component avoids `SUPERSEDED` rejections from the
+        validator when exploit mode re-picks the same prompt twice.
         """
         self._reset_stats_if_stale(local_n)
-        excluded = cooldown_set | self._blacklisted_prompts
+        if window_n != self._last_seen_window:
+            self._picked_this_window.clear()
+            self._last_seen_window = window_n
+        excluded = (
+            cooldown_set | self._blacklisted_prompts | self._picked_this_window
+        )
 
+        chosen_idx, mode, mean_sigma, pool_size = self._pick_inner(
+            excluded, rng
+        )
+        self._picked_this_window.add(chosen_idx)
+        return chosen_idx, mode, mean_sigma, pool_size
+
+    def _pick_inner(
+        self, excluded: set[int], rng: _random.Random
+    ) -> tuple[int, str, float | None, int]:
         if rng.random() < self._EXPLORE_RATE:
             return pick_prompt_idx(self.env, excluded, rng=rng), "explore", None, 0
 
@@ -792,15 +861,50 @@ class MiningEngine:
             chosen_mean = weights[candidates.index(chosen)]
             return chosen, "exploit", chosen_mean, pool_size
 
-        # Level-biased fallback: weight levels by their mean σ. A level
-        # with mean σ = 0 (consistently all-correct or all-wrong) gets
-        # weight 0; a level near σ=0.5 gets the highest weight. This
-        # concentrates picks where the policy is most learnable instead
-        # of wasting attempts on levels Qwen3-4B has already mastered.
+        # Bucket prior (level + subject) — finer-grained than level alone.
+        bucket_choice = self._pick_by_bucket_prior(excluded, rng)
+        if bucket_choice is not None:
+            return bucket_choice, "bucket_biased", None, pool_size
+
+        # Level prior — coarser fallback for buckets we haven't observed yet.
         level_choice = self._pick_by_level_prior(excluded, rng)
         if level_choice is not None:
             return level_choice, "level_biased", None, pool_size
         return pick_prompt_idx(self.env, excluded, rng=rng), "fallback", None, pool_size
+
+    def _pick_by_bucket_prior(
+        self, excluded: set[int], rng: _random.Random
+    ) -> int | None:
+        """Pick by (level, subject) bucket prior — finer-grained than level
+        alone. Combines the level static prior with observed mean σ per
+        bucket. Subject contributes via observations only (no static prior
+        because subject-difficulty is model-dependent and we don't want to
+        hardcode our intuitions about Qwen3's weak spots).
+        """
+        buckets_by_idx = self._build_prompts_by_bucket()
+        if not buckets_by_idx:
+            return None
+
+        STATIC_LEVEL = {1: 0.10, 2: 0.20, 3: 0.50, 4: 0.90, 5: 1.00}
+        buckets = sorted(buckets_by_idx.keys())
+        weights: list[float] = []
+        for bucket in buckets:
+            level, _subject = bucket
+            hist = self._bucket_sigma_history.get(bucket)
+            n_obs = len(hist) if hist else 0
+            observed_mean = (sum(hist) / n_obs) if n_obs else 0.0
+            alpha = min(0.7, n_obs / 10.0)
+            prior = STATIC_LEVEL.get(level, 0.5)
+            weights.append(alpha * observed_mean + (1.0 - alpha) * prior)
+
+        if not any(w > 0 for w in weights):
+            return None
+        chosen_bucket = rng.choices(buckets, weights=weights, k=1)[0]
+        bucket_prompts = buckets_by_idx[chosen_bucket]
+        eligible = [p for p in bucket_prompts if p not in excluded]
+        if not eligible:
+            return None
+        return rng.choice(eligible)
 
     def _pick_by_level_prior(
         self, excluded: set[int], rng: _random.Random
