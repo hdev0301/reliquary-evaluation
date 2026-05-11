@@ -207,12 +207,30 @@ class MiningEngine:
         # outside the learnable band for this policy — retrying just wastes
         # another full rollout group on a guaranteed OUT_OF_ZONE.
         self._blacklisted_prompts: set[int] = set()
+        # Per-difficulty-level σ history. MATH problems have levels 1–5;
+        # Qwen3-4B-Instruct typically dominates level 1–2 (σ=0 all-correct)
+        # and struggles with 5 (σ=0 all-wrong) — the in-zone band tends to
+        # live in 3–4. We accumulate sigma observations per level and use
+        # the level distribution to bias fallback picks toward the
+        # currently most-learnable level.
+        self._level_sigma_history: dict[int, deque] = {}
+        # Pre-built level → list[prompt_idx] map, built lazily on first use.
+        self._prompts_by_level: dict[int, list[int]] | None = None
         self._stats_checkpoint_n: int = -1
         self._STATS_MAXLEN = 5
-        self._STATS_MIN_OBS = 2
+        # Single-observation is enough for inclusion: with ~12,500 prompts
+        # and ~50 picks/hour, repeat picks on the same prompt are rare, so
+        # waiting for 2 observations would keep the picker in fallback
+        # indefinitely. The blacklist (σ < threshold) already filters bad
+        # prompts; remaining observations are reliable enough.
+        self._STATS_MIN_OBS = 1
         self._SIGMA_THRESHOLD = 0.43
         self._EXPLORE_RATE = 0.20
-        self._MIN_FRONTIER_POOL = 10
+        # Exploit fires after 3 in-zone observations rather than 10 — the
+        # candidate pool grows slowly given the prompt count, and we'd
+        # rather concentrate on a thin pool of known-good than dilute back
+        # to uniform-random fallback.
+        self._MIN_FRONTIER_POOL = 3
 
     # ------------------------------------------------------------------
     # Public API
@@ -634,7 +652,33 @@ class MiningEngine:
         if local_n != self._stats_checkpoint_n:
             self._prompt_sigma_history.clear()
             self._blacklisted_prompts.clear()
+            self._level_sigma_history.clear()
             self._stats_checkpoint_n = local_n
+
+    def _get_level(self, prompt_idx: int) -> int | None:
+        """Read the MATH difficulty level (1–5) for a prompt, or None if
+        the underlying dataset doesn't expose it."""
+        dataset = getattr(self.env, "_dataset", None)
+        if dataset is None:
+            return None
+        try:
+            row = dataset[prompt_idx % len(dataset)]
+            level_str = str(row.get("level", "")).strip()
+            if not level_str:
+                return None
+            return int(level_str.split()[-1])
+        except (KeyError, ValueError, IndexError, TypeError):
+            return None
+
+    def _build_prompts_by_level(self) -> dict[int, list[int]]:
+        if self._prompts_by_level is None:
+            mapping: dict[int, list[int]] = {}
+            for i in range(len(self.env)):
+                level = self._get_level(i)
+                if level is not None:
+                    mapping.setdefault(level, []).append(i)
+            self._prompts_by_level = mapping
+        return self._prompts_by_level
 
     def _record_sigma(self, prompt_idx: int, sigma_obs: float, local_n: int) -> None:
         self._reset_stats_if_stale(local_n)
@@ -645,6 +689,13 @@ class MiningEngine:
         hist.append(sigma_obs)
         if sigma_obs < self._SIGMA_THRESHOLD:
             self._blacklisted_prompts.add(prompt_idx)
+        level = self._get_level(prompt_idx)
+        if level is not None:
+            level_hist = self._level_sigma_history.get(level)
+            if level_hist is None:
+                level_hist = deque(maxlen=50)
+                self._level_sigma_history[level] = level_hist
+            level_hist.append(sigma_obs)
 
     def _pick_prompt_idx_smart(
         self,
@@ -656,9 +707,9 @@ class MiningEngine:
 
         Returns ``(prompt_idx, mode, mean_sigma_or_None, pool_size)``. Mode
         is one of ``"explore"`` (ε-coin), ``"exploit"`` (frontier sample),
-        or ``"fallback"`` (pool too small). The exclusion set is the union
-        of the validator's cooldown set and our local blacklist of prompts
-        seen with σ < threshold under the current checkpoint.
+        ``"level_biased"`` (no exploit pool yet but level priors available),
+        or ``"fallback"`` (uniform random). Exclusion set is the union of
+        the validator's cooldown set and our local blacklist.
         """
         self._reset_stats_if_stale(local_n)
         excluded = cooldown_set | self._blacklisted_prompts
@@ -681,4 +732,52 @@ class MiningEngine:
             chosen = rng.choices(candidates, weights=weights, k=1)[0]
             chosen_mean = weights[candidates.index(chosen)]
             return chosen, "exploit", chosen_mean, pool_size
+
+        # Level-biased fallback: weight levels by their mean σ. A level
+        # with mean σ = 0 (consistently all-correct or all-wrong) gets
+        # weight 0; a level near σ=0.5 gets the highest weight. This
+        # concentrates picks where the policy is most learnable instead
+        # of wasting attempts on levels Qwen3-4B has already mastered.
+        level_choice = self._pick_by_level_prior(excluded, rng)
+        if level_choice is not None:
+            return level_choice, "level_biased", None, pool_size
         return pick_prompt_idx(self.env, excluded, rng=rng), "fallback", None, pool_size
+
+    def _pick_by_level_prior(
+        self, excluded: set[int], rng: _random.Random
+    ) -> int | None:
+        """Pick a prompt by difficulty-level prior.
+
+        Combines a static prior (level 5 hardest → highest weight) with the
+        observed mean σ per level. The static prior dominates when we have
+        few observations; observations take over as they accumulate. Without
+        the static prior, all picks return σ=0 initially → all level weights
+        stay at 0 → picker falls back to uniform-random over all prompts,
+        which keeps hitting trivially-easy level 1–2 prompts that Qwen3-4B
+        solves 8/8.
+        """
+        levels_by_pid = self._build_prompts_by_level()
+        if not levels_by_pid:
+            return None
+
+        STATIC_PRIOR = {1: 0.10, 2: 0.20, 3: 0.50, 4: 0.90, 5: 1.00}
+        levels = sorted(levels_by_pid.keys())
+        weights: list[float] = []
+        for lv in levels:
+            hist = self._level_sigma_history.get(lv)
+            n_obs = len(hist) if hist else 0
+            observed_mean = (sum(hist) / n_obs) if n_obs else 0.0
+            # Observation weight ramps from 0 → 0.7 over ~14 obs. Below that
+            # the static prior keeps the picker pointed at hard levels.
+            alpha = min(0.7, n_obs / 20.0)
+            prior = STATIC_PRIOR.get(lv, 0.5)
+            weights.append(alpha * observed_mean + (1.0 - alpha) * prior)
+
+        if not any(w > 0 for w in weights):
+            return None
+        chosen_level = rng.choices(levels, weights=weights, k=1)[0]
+        level_prompts = levels_by_pid[chosen_level]
+        eligible = [p for p in level_prompts if p not in excluded]
+        if not eligible:
+            return None
+        return rng.choice(eligible)
