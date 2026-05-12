@@ -675,6 +675,37 @@ class _SubmitCtx:
     checkpoint_n: int = 0
 
 
+@dataclass
+class _PregenCandidate:
+    """A pre-generated rollout group produced during CLOSED/TRAINING/PUBLISHING
+    so that the OPEN-phase critical path skips PICK + GEN + SCORE and goes
+    straight to PROOF + SUBMIT. Cuts ~30s off post-OPEN latency, which is the
+    dominant lever for winning the validator's FIFO race.
+    """
+
+    prompt_idx: int
+    level: str
+    subject: str
+    generations: list[dict]
+    rewards: list[float]
+    completion_lens: list[int]
+    sigma: float
+    k_solved: int
+    in_zone: bool
+    gen_ms: float
+    created_at_t: float
+    created_at_window_n: int
+    created_at_checkpoint_n: int
+
+
+# Maximum staleness of a pregen candidate before it gets discarded. Older
+# than this and the cohort signal / cooldown set has drifted too far.
+_PREGEN_MAX_AGE_S: float = 180.0
+# Max simultaneous queued pregen candidates. 1 = first submission per
+# window benefits; subsequent ones go through the normal live pipeline.
+_PREGEN_MAX_QUEUE: int = 1
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint pull
 # ---------------------------------------------------------------------------
@@ -1577,6 +1608,11 @@ class MiningEngine:
         # Per-window OOZ-cohort blacklist — reset at every window-roll boundary.
         self._ooz_cohorts_in_window: set[tuple[str, str]] = set()
 
+        # Pre-generation pipeline state. Producer runs during non-OPEN
+        # phases; consumer pulls in OPEN phase to skip live PICK+GEN+SCORE.
+        self._pregen_queue: list[_PregenCandidate] = []
+        self._pregen_task: asyncio.Task | None = None
+
     def _resolve_eos_ids(self) -> set[int]:
         """Collect every token ID the model treats as a stop token, from
         tokenizer.eos_token_id and both models' generation_config (Qwen3
@@ -1985,6 +2021,9 @@ class MiningEngine:
                     _pending_task = None
                     _pending_ctx = None
 
+                # Drain completed pregen producer task.
+                self._drain_completed_pregen()
+
                 # Window rolled while a submit was in flight: the response
                 # will be window_mismatch / window_not_active anyway, so
                 # cancel and free the network.
@@ -2044,6 +2083,9 @@ class MiningEngine:
                     local_hash = state.checkpoint_revision
 
                 if state.state != WindowState.OPEN:
+                    # Idle phase — pre-generate a candidate so the next
+                    # OPEN can skip live PICK+GEN and submit ~30s sooner.
+                    self._maybe_spawn_pregen(state, rng)
                     await asyncio.sleep(1)
                     continue
 
@@ -2166,164 +2208,198 @@ class MiningEngine:
                     continue
 
                 cooldown_set = set(state.cooldown_prompts)
-                try:
-                    _open_age_s = _now_age_s
-                    _http_avg_s = (
-                        self._metrics.recent_http_avg_s()
-                        or _DEADLINE_HTTP_DEFAULT_S
+
+                # Pregen fast path: skip live PICK+GEN+SCORE if a
+                # pre-generated candidate is ready and still valid.
+                pregen = self._try_consume_pregen(state, cooldown_set)
+
+                if pregen is not None:
+                    prompt_idx = pregen.prompt_idx
+                    level = pregen.level
+                    subject = pregen.subject
+                    generations = pregen.generations
+                    rewards = pregen.rewards
+                    completion_lens = pregen.completion_lens
+                    sigma = pregen.sigma
+                    k_solved = pregen.k_solved
+                    in_zone = pregen.in_zone
+                    gen_ms = pregen.gen_ms
+                    score_ms = 0.0
+                    problem = self.env.get_problem(prompt_idx)
+                    pregen_age_s = time.monotonic() - pregen.created_at_t
+                    open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if self._window_open_seen_at is not None
+                        else 0.0
                     )
-                    _proof_avg_s = (
-                        self._metrics.recent_proof_avg_s()
-                        or _DEADLINE_PROOF_DEFAULT_S
-                    )
-                    prompt_idx = pick_prompt_idx(
-                        self.env, cooldown_set,
-                        rng=rng, stats=self._prompt_stats,
-                        current_checkpoint_n=state.checkpoint_n,
-                        slots_filled=state.valid_submissions,
-                        superseded_in_window=self._superseded_in_window,
-                        open_age_s=_open_age_s,
-                        open_budget_s=_eff_budget_s,
-                        proof_avg_s=_proof_avg_s,
-                        http_avg_s=_http_avg_s,
-                        ooz_cohorts_in_window=self._ooz_cohorts_in_window,
-                    )
-                except RuntimeError:
                     _emit(
                         logging.INFO,
-                        "[W=%d] WAIT env fully blocked cooldown=%d superseded=%d "
-                        "env=%d; sleeping 5s",
-                        state.window_n, len(cooldown_set),
-                        len(self._superseded_in_window), len(self.env),
+                        "[W=%d] PICK prompt=%-4d cohort=(%s,%s) pregen=True "
+                        "age=%.1fs k=%d/%d sigma=%.3f in_zone=%s slots=%d/%d "
+                        "open_age=%.1fs",
+                        state.window_n, prompt_idx,
+                        _short_level(level), _short_subject(subject),
+                        pregen_age_s, k_solved, M_ROLLOUTS, sigma, in_zone,
+                        state.valid_submissions, B_BATCH, open_age_s,
                     )
-                    await asyncio.sleep(5)
-                    continue
-
-                problem = self.env.get_problem(prompt_idx)
-                level = problem.get("level", "")
-                subject = problem.get("subject", "")
-                a, b = self._prompt_stats.posterior(
-                    prompt_idx, state.checkpoint_n, level, subject,
-                )
-                p_hat = a / (a + b)
-                attempts = self._prompt_stats.attempts(prompt_idx)
-                arr = self._prompt_stats.arrival_rate(prompt_idx)
-                open_age_s = (
-                    time.monotonic() - self._window_open_seen_at
-                    if getattr(self, "_window_open_seen_at", None) is not None
-                    else 0.0
-                )
-                _emit(
-                    logging.INFO,
-                    "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
-                    "attempts=%d arr=%.2f zone_p=%.2f slots=%d/%d "
-                    "open_age=%.1fs (min=%ds, eff_budget=%.0fs) "
-                    "ooz_blk=%d",
-                    state.window_n, prompt_idx,
-                    _short_level(level), _short_subject(subject),
-                    p_hat, attempts, arr, _zone_probability(p_hat),
-                    state.valid_submissions, B_BATCH,
-                    open_age_s, _OPEN_PHASE_MIN_S, _eff_budget_s,
-                    len(self._ooz_cohorts_in_window),
-                )
-                logger.debug(
-                    "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
-                    "level=%r subject=%r",
-                    state.window_n, prompt_idx, a, b, level, subject,
-                )
-
-                if self._window_roll_detector.check_and_update(
-                    state.window_n,
-                    getattr(state.state, "value", str(state.state)),
-                ):
                     _emit(
                         logging.INFO,
-                        "[W=%d] WINDOW_OPEN detected — queuing early submission "
-                        "for FIFO advantage",
-                        state.window_n,
-                    )
-
-                # Dispatch vLLM .generate() via asyncio.to_thread so the
-                # event loop
-                # can service in-flight network I/O (the previous
-                # submit's body upload + response, /state polls, etc.)
-                # while the GPU is producing tokens. Without this, the
-                # ~10-30 s vLLM call freezes httpx's reactor, which is
-                # the silent cause of the previous submit completing
-                # 10-30 s LATER than it actually finished on the wire.
-                # vLLM's sync ``LLM.generate`` serializes through its
-                # own scheduler so the off-thread dispatch is safe.
-                
-                # v4.3 Optimization: Completion cache (check before generation)
-                cached_tokens = self._completion_cache.get(
-                    prompt_idx, state.checkpoint_n
-                )
-                if cached_tokens is not None:
-                    t_gen = time.monotonic()
-                    generations = [
-                        type("RolloutGen", (), {
-                            "tokens": cached_tokens,
-                            "commit": {},
-                        })()
-                    ] * M_ROLLOUTS
-                    gen_ms = (time.monotonic() - t_gen) * 1000.0
-                    _emit(
-                        logging.INFO,
-                        "[W=%d] CACHE prompt=%-4d HIT tokens=%d cached "
-                        "(saved ~15-35s) — using cached completion",
-                        state.window_n, prompt_idx, len(cached_tokens),
+                        "[W=%d] GEN  prompt=%-4d rewards=%s k=%d/%d sigma=%.3f "
+                        "in_zone=%s gen=%.1fs (pregen age=%.1fs) score=%.2fs "
+                        "clen=%d/%d/%d",
+                        state.window_n, prompt_idx,
+                        _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
+                        in_zone, gen_ms / 1000.0, pregen_age_s,
+                        score_ms / 1000.0,
+                        min(completion_lens),
+                        sorted(completion_lens)[len(completion_lens) // 2],
+                        max(completion_lens),
                     )
                 else:
-                    t_gen = time.monotonic()
-                    generations = await asyncio.to_thread(
-                        self._generate_n_rollouts,
-                        problem, M_ROLLOUTS,
-                        prompt_idx,
-                    )
-                    gen_ms = (time.monotonic() - t_gen) * 1000.0
+                    try:
+                        _open_age_s = _now_age_s
+                        _http_avg_s = (
+                            self._metrics.recent_http_avg_s()
+                            or _DEADLINE_HTTP_DEFAULT_S
+                        )
+                        _proof_avg_s = (
+                            self._metrics.recent_proof_avg_s()
+                            or _DEADLINE_PROOF_DEFAULT_S
+                        )
+                        prompt_idx = pick_prompt_idx(
+                            self.env, cooldown_set,
+                            rng=rng, stats=self._prompt_stats,
+                            current_checkpoint_n=state.checkpoint_n,
+                            slots_filled=state.valid_submissions,
+                            superseded_in_window=self._superseded_in_window,
+                            open_age_s=_open_age_s,
+                            open_budget_s=_eff_budget_s,
+                            proof_avg_s=_proof_avg_s,
+                            http_avg_s=_http_avg_s,
+                            ooz_cohorts_in_window=self._ooz_cohorts_in_window,
+                        )
+                    except RuntimeError:
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] WAIT env fully blocked cooldown=%d "
+                            "superseded=%d env=%d; sleeping 5s",
+                            state.window_n, len(cooldown_set),
+                            len(self._superseded_in_window), len(self.env),
+                        )
+                        await asyncio.sleep(5)
+                        continue
 
-                # Opportunistic drain: surface accept/reject sooner.
-                if _pending_task is not None and _pending_task.done():
-                    await _drain_submit(_pending_task, _pending_ctx)
-                    _pending_task = None
-                    _pending_ctx = None
-                if len(generations) < M_ROLLOUTS:
+                    problem = self.env.get_problem(prompt_idx)
+                    level = problem.get("level", "")
+                    subject = problem.get("subject", "")
+                    a, b = self._prompt_stats.posterior(
+                        prompt_idx, state.checkpoint_n, level, subject,
+                    )
+                    p_hat = a / (a + b)
+                    attempts = self._prompt_stats.attempts(prompt_idx)
+                    arr = self._prompt_stats.arrival_rate(prompt_idx)
+                    open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if getattr(self, "_window_open_seen_at", None) is not None
+                        else 0.0
+                    )
                     _emit(
-                        logging.WARNING,
-                        "[W=%d] GEN  prompt=%-4d short: only %d/%d rollouts "
-                        "(gen=%.1fs) -> skip",
+                        logging.INFO,
+                        "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
+                        "attempts=%d arr=%.2f zone_p=%.2f slots=%d/%d "
+                        "open_age=%.1fs (min=%ds, eff_budget=%.0fs) "
+                        "ooz_blk=%d",
                         state.window_n, prompt_idx,
-                        len(generations), M_ROLLOUTS, gen_ms / 1000.0,
+                        _short_level(level), _short_subject(subject),
+                        p_hat, attempts, arr, _zone_probability(p_hat),
+                        state.valid_submissions, B_BATCH,
+                        open_age_s, _OPEN_PHASE_MIN_S, _eff_budget_s,
+                        len(self._ooz_cohorts_in_window),
                     )
-                    continue
+                    logger.debug(
+                        "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
+                        "level=%r subject=%r",
+                        state.window_n, prompt_idx, a, b, level, subject,
+                    )
 
-                # Score before proof — posterior updates even if submit fails.
-                t_score = time.monotonic()
-                scored = [self._score_rollout(g, problem) for g in generations]
-                score_ms = (time.monotonic() - t_score) * 1000.0
-                rewards = [r for r, _ in scored]
-                completion_lens = [length for _, length in scored]
+                    if self._window_roll_detector.check_and_update(
+                        state.window_n,
+                        getattr(state.state, "value", str(state.state)),
+                    ):
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] WINDOW_OPEN detected — queuing early "
+                            "submission for FIFO advantage",
+                            state.window_n,
+                        )
 
-                self._prompt_stats.record_group(
-                    prompt_idx, rewards,
-                    level=level, subject=subject,
-                    checkpoint_n=state.checkpoint_n,
-                    completion_lens=completion_lens,
-                )
-                sigma, k_solved, in_zone = _zone_status(rewards)
-                self._metrics.record_generation(k_solved)
-                self._maybe_persist_stats()
-                _emit(
-                    logging.INFO,
-                    "[W=%d] GEN  prompt=%-4d rewards=%s k=%d/%d sigma=%.3f "
-                    "in_zone=%s gen=%.1fs score=%.2fs clen=%d/%d/%d",
-                    state.window_n, prompt_idx,
-                    _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
-                    in_zone, gen_ms / 1000.0, score_ms / 1000.0,
-                    min(completion_lens),
-                    sorted(completion_lens)[len(completion_lens) // 2],
-                    max(completion_lens),
-                )
+                    cached_tokens = self._completion_cache.get(
+                        prompt_idx, state.checkpoint_n
+                    )
+                    if cached_tokens is not None:
+                        t_gen = time.monotonic()
+                        generations = [
+                            type("RolloutGen", (), {
+                                "tokens": cached_tokens,
+                                "commit": {},
+                            })()
+                        ] * M_ROLLOUTS
+                        gen_ms = (time.monotonic() - t_gen) * 1000.0
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] CACHE prompt=%-4d HIT tokens=%d cached "
+                            "(saved ~15-35s) — using cached completion",
+                            state.window_n, prompt_idx, len(cached_tokens),
+                        )
+                    else:
+                        t_gen = time.monotonic()
+                        generations = await asyncio.to_thread(
+                            self._generate_n_rollouts,
+                            problem, M_ROLLOUTS,
+                            prompt_idx,
+                        )
+                        gen_ms = (time.monotonic() - t_gen) * 1000.0
+
+                    if _pending_task is not None and _pending_task.done():
+                        await _drain_submit(_pending_task, _pending_ctx)
+                        _pending_task = None
+                        _pending_ctx = None
+                    if len(generations) < M_ROLLOUTS:
+                        _emit(
+                            logging.WARNING,
+                            "[W=%d] GEN  prompt=%-4d short: only %d/%d rollouts "
+                            "(gen=%.1fs) -> skip",
+                            state.window_n, prompt_idx,
+                            len(generations), M_ROLLOUTS, gen_ms / 1000.0,
+                        )
+                        continue
+
+                    t_score = time.monotonic()
+                    scored = [self._score_rollout(g, problem) for g in generations]
+                    score_ms = (time.monotonic() - t_score) * 1000.0
+                    rewards = [r for r, _ in scored]
+                    completion_lens = [length for _, length in scored]
+
+                    self._prompt_stats.record_group(
+                        prompt_idx, rewards,
+                        level=level, subject=subject,
+                        checkpoint_n=state.checkpoint_n,
+                        completion_lens=completion_lens,
+                    )
+                    sigma, k_solved, in_zone = _zone_status(rewards)
+                    self._metrics.record_generation(k_solved)
+                    self._maybe_persist_stats()
+                    _emit(
+                        logging.INFO,
+                        "[W=%d] GEN  prompt=%-4d rewards=%s k=%d/%d sigma=%.3f "
+                        "in_zone=%s gen=%.1fs score=%.2fs clen=%d/%d/%d",
+                        state.window_n, prompt_idx,
+                        _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
+                        in_zone, gen_ms / 1000.0, score_ms / 1000.0,
+                        min(completion_lens),
+                        sorted(completion_lens)[len(completion_lens) // 2],
+                        max(completion_lens),
+                    )
 
                 # Cherry-pick over-generation: if M=8 is OOZ, draw
                 # OVERGEN_EXTRA more honest rollouts at T_PROTO and try
@@ -2828,6 +2904,15 @@ class MiningEngine:
                 pass
             _pending_task = None
 
+        # Cancel any in-flight pregen so it doesn't outlive the loop.
+        if self._pregen_task is not None and not self._pregen_task.done():
+            self._pregen_task.cancel()
+            try:
+                await self._pregen_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pregen_task = None
+
         return results
 
     def _record_observed_open_duration(self, duration_s: float) -> None:
@@ -2880,6 +2965,156 @@ class MiningEngine:
                 self._metrics.batched_proof_consecutive_fails,
             )
             self._metrics.note_proof_fallback()
+
+    # ------------------------------------------------------------------
+    # Pre-generation pipeline — produce during idle phases, consume at OPEN
+    # ------------------------------------------------------------------
+
+    def _drain_completed_pregen(self) -> None:
+        """If the pregen task finished, collect any exception and clear."""
+        if self._pregen_task is None or not self._pregen_task.done():
+            return
+        exc = self._pregen_task.exception()
+        if exc is not None and not isinstance(exc, asyncio.CancelledError):
+            logger.exception(
+                "pregen task raised: %s", exc, exc_info=exc,
+            )
+        self._pregen_task = None
+
+    def _try_consume_pregen(
+        self,
+        state,
+        cooldown_set: set[int],
+    ) -> _PregenCandidate | None:
+        """Pop a fresh, valid pregen candidate or return None.
+
+        Discards entries that have aged out, were generated under a
+        different checkpoint, or whose prompt has since entered cooldown
+        or the per-window superseded blacklist.
+        """
+        if not self._pregen_queue:
+            return None
+        now = time.monotonic()
+        self._pregen_queue = [
+            c for c in self._pregen_queue
+            if now - c.created_at_t < _PREGEN_MAX_AGE_S
+            and c.created_at_checkpoint_n == state.checkpoint_n
+            and c.prompt_idx not in cooldown_set
+            and c.prompt_idx not in self._superseded_in_window
+        ]
+        if not self._pregen_queue:
+            return None
+        return self._pregen_queue.pop(0)
+
+    def _maybe_spawn_pregen(
+        self,
+        state,
+        rng: _random.Random,
+    ) -> None:
+        """Spawn a pregen producer task if eligible (no task running,
+        queue has room). Fire-and-forget; result is drained next loop tick.
+        """
+        if self._pregen_task is not None and not self._pregen_task.done():
+            return
+        if len(self._pregen_queue) >= _PREGEN_MAX_QUEUE:
+            return
+        self._pregen_task = asyncio.create_task(
+            self._produce_pregen(state, rng),
+            name=f"pregen-w{state.window_n}",
+        )
+
+    async def _produce_pregen(
+        self,
+        state,
+        rng: _random.Random,
+    ) -> None:
+        """Pick + gen + score one candidate and push to the queue.
+
+        Records posterior + metrics just like the live pipeline. Picker
+        runs with conservative deadline defaults (full OPEN budget,
+        open_age=0) since we're generating before OPEN even starts.
+        """
+        cooldown_set = set(state.cooldown_prompts)
+        try:
+            prompt_idx = pick_prompt_idx(
+                self.env, cooldown_set,
+                rng=rng, stats=self._prompt_stats,
+                current_checkpoint_n=state.checkpoint_n,
+                slots_filled=0,
+                superseded_in_window=self._superseded_in_window,
+                open_age_s=0.0,
+                open_budget_s=float(_OPEN_PHASE_BUDGET_S),
+                proof_avg_s=(
+                    self._metrics.recent_proof_avg_s()
+                    or _DEADLINE_PROOF_DEFAULT_S
+                ),
+                http_avg_s=(
+                    self._metrics.recent_http_avg_s()
+                    or _DEADLINE_HTTP_DEFAULT_S
+                ),
+                ooz_cohorts_in_window=self._ooz_cohorts_in_window,
+            )
+        except RuntimeError:
+            return
+
+        problem = self.env.get_problem(prompt_idx)
+        level = problem.get("level", "")
+        subject = problem.get("subject", "")
+
+        t_gen = time.monotonic()
+        try:
+            generations = await asyncio.to_thread(
+                self._generate_n_rollouts,
+                problem, M_ROLLOUTS, prompt_idx,
+            )
+        except Exception:
+            logger.exception("pregen generation failed for prompt=%d", prompt_idx)
+            return
+        gen_ms = (time.monotonic() - t_gen) * 1000.0
+
+        if len(generations) < M_ROLLOUTS:
+            return
+
+        scored = [self._score_rollout(g, problem) for g in generations]
+        rewards = [r for r, _ in scored]
+        completion_lens = [length for _, length in scored]
+
+        self._prompt_stats.record_group(
+            prompt_idx, rewards,
+            level=level, subject=subject,
+            checkpoint_n=state.checkpoint_n,
+            completion_lens=completion_lens,
+        )
+        sigma, k_solved, in_zone = _zone_status(rewards)
+        self._metrics.record_generation(k_solved)
+        self._maybe_persist_stats()
+
+        candidate = _PregenCandidate(
+            prompt_idx=prompt_idx,
+            level=level,
+            subject=subject,
+            generations=generations,
+            rewards=rewards,
+            completion_lens=completion_lens,
+            sigma=sigma,
+            k_solved=k_solved,
+            in_zone=in_zone,
+            gen_ms=gen_ms,
+            created_at_t=time.monotonic(),
+            created_at_window_n=state.window_n,
+            created_at_checkpoint_n=state.checkpoint_n,
+        )
+        self._pregen_queue.append(candidate)
+
+        _emit(
+            logging.INFO,
+            "[W=%d] PREGEN ready prompt=%-4d cohort=(%s,%s) k=%d/%d "
+            "sigma=%.3f in_zone=%s gen=%.1fs queue=%d",
+            state.window_n, prompt_idx,
+            _short_level(level), _short_subject(subject),
+            k_solved, M_ROLLOUTS, sigma, in_zone, gen_ms / 1000.0,
+            len(self._pregen_queue),
+        )
 
     def _load_checkpoint(self, local_path: str):
         """Reload both hf_model and vllm_model from local_path. vLLM
