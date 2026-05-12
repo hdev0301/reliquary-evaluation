@@ -211,6 +211,24 @@ half of a session.
     deadline math doesn't accept long-completion prompts that
     will overshoot.
 
+23. **P25 anchor for eff_budget (W=973-989 post-mortem).** The
+    original ``_effective_open_budget_s`` used ``min(observed)``
+    which pinned eff_budget=91 s for 18 consecutive windows after
+    a single 107 s observation, even though the validator actually
+    ran 107-250 s windows (mean ≈ 180 s). The picker burned 50-150 s
+    of WAIT per long window. ``min`` → ``sorted[n // 4]`` (25th
+    percentile) at ``n ≥ 5`` observations so a single short outlier
+    no longer dominates; the deque (20 windows) still holds enough
+    history that a SUSTAINED short-window regime shifts the
+    percentile down within ~5 windows. For ``n < 5`` we still use
+    ``min`` because percentile estimates on tiny samples are noise.
+
+24. **Throttled WAIT log.** Previously the hard-deadline gate
+    logged a near-identical WAIT line every 2 s poll. Now we log
+    once on first entry per window (with the reason), then a 30 s
+    heartbeat — keeps the operator informed without drowning out
+    the per-window PICK / GEN / SUB lines.
+
 22. **Continuous length-aware boost.** Picker score gets a smooth
     ``× (1 + 0.10 × (1 - avg_len/4096))`` multiplier clamped to
     [0.85, 1.15]. The existing deadline penalty is binary (kicks
@@ -2741,16 +2759,35 @@ class MiningEngine:
                 _eff_budget_s = self._effective_open_budget_s()
                 _hard_deadline_s = _eff_budget_s - _min_pipeline_s
                 if _now_age_s > _hard_deadline_s:
-                    _emit(
-                        logging.INFO,
-                        "[W=%d] WAIT open_age=%.1fs > hard_deadline=%.1fs "
-                        "(eff_budget=%.0fs - http=%.1f - proof=%.1f - min_gen=%.1f) "
-                        "— window already too old to land a submit; "
-                        "idling 2s",
-                        state.window_n, _now_age_s, _hard_deadline_s,
-                        _eff_budget_s, _hard_http_s,
-                        _hard_proof_s, _hard_min_gen_s,
-                    )
+                    # Throttle the WAIT log: emit once on first entry per
+                    # window (so the operator sees WHY the picker stopped),
+                    # then a heartbeat every 30 s. Previously every 2 s
+                    # poll logged a near-identical line, drowning the rest
+                    # of the engine's per-window output in repetitive
+                    # WAIT lines (see W=975-989 traces).
+                    _wait_state = getattr(self, "_wait_log_state", None)
+                    _wn = state.window_n
+                    _emit_wait = False
+                    if _wait_state is None or _wait_state[0] != _wn:
+                        # First WAIT entry of this window.
+                        self._wait_log_state = (_wn, time.monotonic())
+                        _emit_wait = True
+                    else:
+                        # Subsequent WAIT polls — log a 30 s heartbeat only.
+                        if time.monotonic() - _wait_state[1] >= 30.0:
+                            self._wait_log_state = (_wn, time.monotonic())
+                            _emit_wait = True
+                    if _emit_wait:
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] WAIT open_age=%.1fs > hard_deadline=%.1fs "
+                            "(eff_budget=%.0fs - http=%.1f - proof=%.1f - "
+                            "min_gen=%.1f) — window already too old to land "
+                            "a submit; idling until next window",
+                            state.window_n, _now_age_s, _hard_deadline_s,
+                            _eff_budget_s, _hard_http_s,
+                            _hard_proof_s, _hard_min_gen_s,
+                        )
                     await asyncio.sleep(2.0)
                     continue
 
@@ -3525,20 +3562,46 @@ class MiningEngine:
         Until we have ≥ 3 observations, fall back to the configured
         ``_OPEN_PHASE_BUDGET_S`` constant (we don't have enough data
         to clamp confidently). Once we do, return
-        ``min(_OPEN_PHASE_BUDGET_S, observed_min × safety_factor)``
-        floored at ``_OBSERVED_OPEN_MIN_FLOOR_S`` so an unlucky run
-        of short windows never drives the budget so low that the
-        picker can't pick anything.
+        ``P25(observed) × safety_factor`` floored at
+        ``_OBSERVED_OPEN_MIN_FLOOR_S`` and capped at the configured
+        ``_OPEN_PHASE_BUDGET_S`` ceiling.
 
-        Using ``min`` rather than ``mean`` / ``p10`` is deliberate:
-        we want the WORST observed OPEN, because that's what's going
-        to cost us a submission. The safety factor adds 10 % margin
-        under that worst case for headroom.
+        Why P25 rather than ``min`` (v4.2 → v4.3 W=973-989 lesson):
+
+        The original implementation used ``min(observed)``. That made
+        a single 107 s window (W=973) pin eff_budget=91 s for every
+        subsequent window — but the actual validator windows ranged
+        107-250 s, mean ≈ 180 s. The picker was then idling in WAIT
+        for 50-150 s per window because hard_deadline=78 s was way
+        too tight against the real OPEN duration. We saw multiple
+        late submits (open_age 80-118 s) succeed when the picker
+        DID happen to push past, proving the budget was the
+        bottleneck.
+
+        P25 (25th percentile) drops the bottom 25 % of observations
+        as outliers — a single short window no longer dominates,
+        but a SUSTAINED run of short windows (e.g. validator under
+        load) shifts P25 down within ~5 windows. The safety factor
+        (0.85) keeps a 15 % margin against the P25 we're betting on,
+        so the picker rarely commits to a pipeline that overshoots.
+
+        For ``n < 5`` observations we use ``min`` (no statistical
+        confidence in a percentile yet); for ``n ≥ 5`` we use
+        ``sorted[n // 4]`` which is exactly the 25th-percentile
+        index by the "lower" interpolation convention. The deque
+        is bounded by ``_OBSERVED_OPEN_HISTORY = 20``.
         """
-        if len(self._observed_open_durations_s) < 3:
+        n = len(self._observed_open_durations_s)
+        if n < 3:
             return float(_OPEN_PHASE_BUDGET_S)
-        worst_observed = min(self._observed_open_durations_s)
-        effective = worst_observed * _OBSERVED_OPEN_SAFETY_FACTOR
+        sorted_durations = sorted(self._observed_open_durations_s)
+        if n < 5:
+            # Not enough samples for a confident percentile; use min.
+            anchor = sorted_durations[0]
+        else:
+            # P25: the ``n // 4``-th element of the sorted deque.
+            anchor = sorted_durations[n // 4]
+        effective = anchor * _OBSERVED_OPEN_SAFETY_FACTOR
         effective = max(effective, _OBSERVED_OPEN_MIN_FLOOR_S)
         effective = min(effective, float(_OPEN_PHASE_BUDGET_S))
         return effective
