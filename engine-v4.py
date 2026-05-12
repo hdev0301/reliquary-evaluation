@@ -137,11 +137,16 @@ _SOLVED_THRESHOLD = 0.5
 _OVERGEN_ENABLED: bool = True
 _OVERGEN_EXTRA: int = 4
 
-# Posterior-informed max_new_tokens cap. With ≥ MIN_OBS prior samples,
-# tighten max_new_tokens to ``observed_max * HEADROOM`` (floored at FLOOR)
-# to bound the slowest rollout in batched generation.
-_PROMPT_BUDGET_MIN_OBS: int = 16
-_PROMPT_BUDGET_HEADROOM: float = 1.25
+# Posterior-informed max_new_tokens cap. Tightens max_new_tokens to
+# ``observed_mean * MULT`` (floored at FLOOR) so the slowest rollout in
+# a batched gen can't drag the whole batch to the 8192 cap. Mean (not
+# max) is used because max equals the protocol cap as soon as any one
+# rollout saturates — useless as a tightening signal. Trade-off: the
+# rare long-tail rollout gets truncated, likely returns reward=0; for
+# k=8/8 saturated prompts that's neutral-to-positive, for in-zone prompts
+# it can knock the group out of zone. Right call when latency > yield.
+_PROMPT_BUDGET_MIN_OBS: int = 8  # one full group of M=8
+_PROMPT_BUDGET_MEAN_MULT: float = 2.0
 _PROMPT_BUDGET_FLOOR: int = 1500
 
 # Skip over-gen past this open_age (would overshoot the window edge).
@@ -988,19 +993,16 @@ class _PromptStats:
                 self._max_lens[prompt_idx] = cur_max
 
     def completion_budget(self, prompt_idx: int) -> int | None:
-        """Suggested max_new_tokens cap from observed completion lengths.
+        """Suggested max_new_tokens cap = mean_completion_len × MULT.
         Returns None until ``_PROMPT_BUDGET_MIN_OBS`` samples accumulated.
         """
         stored = self._lengths.get(prompt_idx)
         if stored is None:
             return None
-        _, n_obs = stored
+        mean_len, n_obs = stored
         if n_obs < _PROMPT_BUDGET_MIN_OBS:
             return None
-        observed_max = self._max_lens.get(prompt_idx)
-        if observed_max is None:
-            return None
-        cap = int(observed_max * _PROMPT_BUDGET_HEADROOM)
+        cap = int(mean_len * _PROMPT_BUDGET_MEAN_MULT)
         return max(cap, _PROMPT_BUDGET_FLOOR)
 
     def record_cooldown_diff(self, new_cooldown_set: set[int] | list[int]) -> None:
