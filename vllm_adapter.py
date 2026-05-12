@@ -37,6 +37,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Heartbeat cadence during long vLLM generate calls. 10s strikes a balance:
+# frequent enough that an operator watching the log gets a steady pulse, slow
+# enough that completions <10s (the common case for short prompts) don't
+# emit any heartbeat at all (cleaner logs for fast iterations).
+_HEARTBEAT_INTERVAL_S = 10.0
+
 
 def _patch_transformers_for_vllm() -> None:
     """Restore ``all_special_tokens_extended`` on the tokenizer base class.
@@ -122,11 +128,43 @@ def _patch_transformers_for_vllm() -> None:
         except Exception:
             pass
 
+    # Additional patch for specific fast tokenizer implementations
+    # that may have their own all_special_tokens_extended access paths
+    try:
+        from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
+        if not hasattr(PreTrainedTokenizerFast, "all_special_tokens_extended"):
+            PreTrainedTokenizerFast.all_special_tokens_extended = property(_get, _set)
+            patched.append("PreTrainedTokenizerFast")
+    except Exception:
+        pass
+
+    # Patch common specific tokenizers that vLLM might instantiate
+    for mod_path, cls_names in [
+        ("transformers.models.qwen2", ["Qwen2Tokenizer", "Qwen2TokenizerFast"]),
+        ("transformers.models.qwen", ["QwenTokenizer"]),  # older Qwen versions
+    ]:
+        for cls_name in cls_names:
+            try:
+                mod = __import__(mod_path, fromlist=[cls_name])
+                cls = getattr(mod, cls_name, None)
+                if cls is None:
+                    continue
+                if "all_special_tokens_extended" not in cls.__dict__:
+                    cls.all_special_tokens_extended = property(_get, _set)
+                    patched.append(cls_name)
+            except Exception:
+                pass
+
     if patched:
         logger.info(
             "patched all_special_tokens_extended on: %s "
             "(vLLM 0.7.x compat with transformers ≥ 4.50)",
             ", ".join(patched),
+        )
+    else:
+        logger.debug(
+            "all_special_tokens_extended patch not needed "
+            "(already available or not used by vLLM)"
         )
 
 
@@ -294,16 +332,48 @@ class VLLMAdapter:
             temperature, top_p, vllm_top_k,
         )
         t0 = time.monotonic()
-        # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg on LLM.generate();
-        # the prompt must be passed positionally as a TokensPrompt-shaped dict.
-        # Dict form ({"prompt_token_ids": ...}) works across 0.8.x–0.20.x —
-        # avoids importing TokensPrompt which moved between vllm.inputs and
-        # vllm.* in different versions.
-        outputs = self._llm.generate(
-            [{"prompt_token_ids": prompt_tokens}],
-            sampling_params=params,
-            use_tqdm=False,
-        )
+
+        # Heartbeat thread: emits a log line every _HEARTBEAT_INTERVAL_S
+        # seconds while ``self._llm.generate()`` is running. Without this,
+        # the call is silent end-to-end for 30-90s on long completions and
+        # the loop looks frozen even though the GPU is busy. The thread is
+        # a daemon so it auto-cleans on process exit; the Event-based wait
+        # exits in ≤ _HEARTBEAT_INTERVAL_S when the main thread sets the
+        # stop flag, so adapter latency is unaffected.
+        import threading
+        _hb_stop = threading.Event()
+
+        def _heartbeat():
+            i = 0
+            while not _hb_stop.wait(_HEARTBEAT_INTERVAL_S):
+                i += 1
+                elapsed = time.monotonic() - t0
+                logger.info(
+                    "vllm.generate ongoing n=%d tick=%d elapsed=%.0fs",
+                    n, i, elapsed,
+                )
+
+        _hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        _hb_thread.start()
+        try:
+            # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg on
+            # LLM.generate(); the prompt must be passed positionally as a
+            # TokensPrompt-shaped dict. Dict form works across 0.8.x–0.20.x —
+            # avoids importing TokensPrompt which moved between vllm.inputs
+            # and vllm.* in different versions.
+            outputs = self._llm.generate(
+                [{"prompt_token_ids": prompt_tokens}],
+                sampling_params=params,
+                use_tqdm=False,
+            )
+        finally:
+            _hb_stop.set()
+            _hb_thread.join(timeout=5.0)
+            if _hb_thread.is_alive():
+                logger.warning(
+                    "heartbeat thread did not join after 5s — vLLM.generate() "
+                    "may have hung or crashed"
+                )
         elapsed_ms = (time.monotonic() - t0) * 1000.0
 
         # outputs is list[RequestOutput] with one element (one prompt).
@@ -333,8 +403,8 @@ class VLLMAdapter:
                 "vLLM returned %d samples for n=%d request; padding short rows",
                 len(rows), n,
             )
-            # Pad with empty completions (engine will see them as 0-length
-            # and skip in the truncation step). Shouldn't happen in practice.
+            # Pad with empty completions — append (prompt + empty tokens).
+            # Engine will see them as 0-length generations and skip in truncation.
             while len(rows) < n:
                 rows.append(list(prompt_tokens))
 

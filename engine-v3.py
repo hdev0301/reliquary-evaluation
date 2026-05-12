@@ -1157,15 +1157,30 @@ class MiningEngine:
         if getattr(self.vllm_model, "_is_vllm_adapter", False):
             try:
                 self.vllm_model.reload(local_path)
-            except Exception:
+            except Exception as e:
                 logger.exception(
-                    "vLLM reload failed for %s; miner generation is BROKEN "
-                    "until the next successful pull. hf_model was swapped "
-                    "so GRAIL proofs will be inconsistent.",
-                    local_path,
+                    "vLLM reload failed for %s; falling back to HF generation path. "
+                    "Error: %s",
+                    local_path, e,
                 )
-                self.vllm_model = None
-                self._loaded_checkpoint_path = None
+                # Fall back to HF backend on same GPU instead of leaving vllm_model=None
+                try:
+                    new_gen = AutoModelForCausalLM.from_pretrained(
+                        local_path,
+                        torch_dtype=torch.bfloat16,
+                        attn_implementation=ATTN_IMPLEMENTATION,
+                    ).to(f"cuda:{self.vllm_gpu}").eval()
+                    self.vllm_model = new_gen
+                    logger.warning("vLLM fallback complete; using HF generation (slower)")
+                except Exception as e2:
+                    logger.exception(
+                        "vLLM fallback also failed: %s. Miner generation is BROKEN.",
+                        e2,
+                    )
+                    raise RuntimeError(
+                        f"Both vLLM reload and HF fallback failed for {local_path}"
+                    ) from e
+                self._loaded_checkpoint_path = local_path
                 return self.hf_model
         else:
             try:
@@ -1240,9 +1255,12 @@ class MiningEngine:
         effective_max_new = min(self.max_new_tokens, budget)
 
         with torch.no_grad():
+            device_str = getattr(self.vllm_model, "device", "cpu")
+            device = torch.device(device_str)
             input_tensor = torch.tensor(
                 [prompt_tokens] * n,
-                device=getattr(self.vllm_model, "device", "cpu"),
+                dtype=torch.long,
+                device=device,
             )
             outputs = self.vllm_model.generate(
                 input_tensor,

@@ -67,8 +67,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 from pathlib import Path
+
+# Tell vLLM not to reconfigure Python logging on import. vLLM 0.9+ calls
+# ``logging.config.dictConfig`` from its own logger module, which replaces
+# the root logger's handlers and silently kills any INFO logs we set up via
+# basicConfig — same failure mode the bittensor comment at logging.basicConfig
+# below describes, just from vLLM instead. Setting this env var BEFORE any
+# transitive vLLM import keeps vLLM out of our logging config entirely; vLLM
+# still emits its own messages via its own logger handlers (the
+# ``(EngineCore pid=X)`` lines), they just don't clobber ours.
+os.environ.setdefault("VLLM_CONFIGURE_LOGGING", "0")
 
 logger = logging.getLogger("reliquary-vllm-launcher")
 
