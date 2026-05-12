@@ -279,8 +279,9 @@ What changed vs v3
       by that rate. Within each window, hard-blacklist any prompt
       that already returned SUPERSEDED to us — that race is lost.
 
-   The picker is still best-of-K Thompson; K halves under race-mode
-   pressure (``slots_filled ≥ 5``) for faster pick → faster submit.
+   The picker is still best-of-K Thompson; ``K`` shrinks as
+   ``slots_filled`` rises toward ``B_BATCH`` (race mode, then near-cap
+   minimal draws) for faster pick and TCP arrival.
 
 2. **Batched GRAIL proof.** ``_build_rollout_submissions`` runs **one**
    padded HF forward pass for all M=8 rollouts in a group instead of
@@ -347,6 +348,7 @@ from urllib.parse import urlparse
 import random as _random
 
 from reliquary.constants import (
+    B_BATCH,
     BLOCK_TIME_SECONDS,
     CHALLENGE_K,
     LAYER_INDEX,
@@ -485,11 +487,16 @@ _CANDIDATES_SECOND_CHANCE = 256
 # CPU cost of one in three picks expanding is well under 1 ms.
 _SECOND_CHANCE_SCORE_THRESHOLD: float = 0.15
 
-# Race mode: when the window is filling up, halve K and bias toward
-# faster prompts (lower historical completion length). Reduces
-# pick-loop latency at the cost of less exploration.
+# Race mode: when ``valid_submissions`` from /state is rising toward
+# ``B_BATCH``, shrink Thompson draws so pick latency stays low — TCP
+# arrival order matters for SUPERSEDED and the worker queue drains
+# faster before ``active_batcher`` swaps.
 _CANDIDATES_RACE = 16
-_RACE_MODE_SLOTS_THRESHOLD = 5  # of B_BATCH=8
+_RACE_MODE_SLOTS_THRESHOLD = max(2, B_BATCH - 4)
+# Near-cap: only ~2 distinct slots likely remain before seal — minimize
+# CPU spent in pick_prompt_idx (microseconds matter vs GRAIL backlog).
+_CANDIDATES_NEAR_FULL = 8
+_NEAR_FULL_SLOTS_THRESHOLD = max(1, B_BATCH - 2)
 
 # Congestion tilt: how strongly to down-weight zone_p by arrival_rate.
 # arrival_rate ∈ [0, 1] roughly: 1 = enters cooldown almost every window
@@ -1801,7 +1808,11 @@ def pick_prompt_idx(
     Tiebreak: shorter average completion length (faster generation →
     earlier TCP arrival → more SUPERSEDED wins).
 
-    Race mode (slots_filled ≥ _RACE_MODE_SLOTS_THRESHOLD): K halves.
+    Near-cap mode (slots_filled ≥ _NEAR_FULL_SLOTS_THRESHOLD): ``K`` is
+    minimal (``_CANDIDATES_NEAR_FULL``) — tail race before ``B_BATCH`` seal.
+
+    Race mode (slots_filled ≥ _RACE_MODE_SLOTS_THRESHOLD but below
+    near-cap): ``K`` is ``_CANDIDATES_RACE`` instead of the default pool.
 
     Hard blacklist: any prompt in ``superseded_in_window`` is skipped
     — the race for that slot is over.
@@ -1836,11 +1847,12 @@ def pick_prompt_idx(
             raise RuntimeError("no eligible prompt — env fully blocked")
         return idx
 
-    K = (
-        _CANDIDATES_RACE
-        if slots_filled >= _RACE_MODE_SLOTS_THRESHOLD
-        else candidates
-    )
+    if slots_filled >= _NEAR_FULL_SLOTS_THRESHOLD:
+        K = _CANDIDATES_NEAR_FULL
+    elif slots_filled >= _RACE_MODE_SLOTS_THRESHOLD:
+        K = _CANDIDATES_RACE
+    else:
+        K = candidates
 
     seen: set[int] = set()
     best_idx: int | None = None
@@ -2807,9 +2819,10 @@ class MiningEngine:
                     else:
                         _emit(
                             logging.INFO,
-                            "=== window %d (first OPEN) === valid=%d/8 "
+                            "=== window %d (first OPEN) === valid=%d/%d "
                             "cooldown=%d ckpt=%d",
                             state.window_n, state.valid_submissions,
+                            B_BATCH,
                             len(state.cooldown_prompts), state.checkpoint_n,
                         )
                     last_window_n = state.window_n
@@ -2842,6 +2855,26 @@ class MiningEngine:
                         state.window_n,
                     )
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+
+                # ``valid_submissions`` tracks accepted rows toward training.
+                # Once it reaches ``B_BATCH``, the validator is sealing — any
+                # new GEN is competing only for archive semantics / next
+                # window; skip pick to save GPU until OPEN rolls.
+                if state.valid_submissions >= B_BATCH:
+                    if getattr(self, "_batch_full_notice_window", None) != (
+                        state.window_n
+                    ):
+                        self._batch_full_notice_window = state.window_n
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] SKIP pick valid=%d/%d — batch target "
+                            "reached; waiting for next window",
+                            state.window_n,
+                            state.valid_submissions,
+                            B_BATCH,
+                        )
+                    await asyncio.sleep(1.0)
                     continue
 
                 # HARD PRE-PICK DEADLINE GATE (v4.2). When the OPEN
@@ -2970,13 +3003,13 @@ class MiningEngine:
                 _emit(
                     logging.INFO,
                     "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
-                    "attempts=%d arr=%.2f zone_p=%.2f slots=%d/8 "
+                    "attempts=%d arr=%.2f zone_p=%.2f slots=%d/%d "
                     "open_age=%.1fs (min=%ds, eff_budget=%.0fs) "
                     "ooz_blk=%d",
                     state.window_n, prompt_idx,
                     _short_level(level), _short_subject(subject),
                     p_hat, attempts, arr, _zone_probability(p_hat),
-                    state.valid_submissions,
+                    state.valid_submissions, B_BATCH,
                     open_age_s, _OPEN_PHASE_MIN_S, _eff_budget_s,
                     len(self._ooz_cohorts_in_window),
                 )
