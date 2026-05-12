@@ -91,17 +91,23 @@ _GENERATE_HEARTBEAT_FRESH_DURATION_S = 0.0
 def _stderr_print(msg: str) -> None:
     """Belt-and-suspenders direct write to stderr.
 
-    Even if the root logger is misconfigured (vLLM ate our handler,
-    bittensor reset it, etc.), this still produces visible output. We
-    pair it with the regular logger call so the line shows up exactly
-    once in the normal case (the stderr print and the logger emission
-    are *different* I/O paths — `_FlushingStreamHandler` writes via the
-    logging framework, this writes raw).
+    Writes to ``sys.__stderr__`` (the original, never-replaced file
+    object) instead of ``sys.stderr``. Bittensor's ``btlogging`` module
+    — which gets pulled in as soon as ``reliquary.miner.submitter`` is
+    imported — replaces ``sys.stderr`` with a tee that ALSO emits the
+    write back through Python's logging framework. So a single
+    ``print(..., file=sys.stderr)`` ends up producing TWO observable
+    lines (one direct, one re-emitted via the root handler) — which is
+    the silent root cause of the "vllm_adapter logs appear 2× then 3×"
+    pattern. Using ``sys.__stderr__`` defeats the tee.
 
+    Even if the root logger is misconfigured (vLLM ate our handler,
+    bittensor reset it, etc.), this still produces visible output.
     Used only by heartbeats; routine log lines go through the logger.
     """
     try:
-        print(msg, file=sys.stderr, flush=True)
+        stream = getattr(sys, "__stderr__", None) or sys.stderr
+        print(msg, file=stream, flush=True)
     except Exception:
         pass
 

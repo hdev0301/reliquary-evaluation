@@ -226,6 +226,54 @@ def _short_subject(subject: str, max_len: int = 12) -> str:
 
 
 # ---------------------------------------------------------------------------
+# GPU memory snapshot (NVML) — cheap, robust, no torch dep
+# ---------------------------------------------------------------------------
+
+_NVML_INITIALIZED = False
+_NVML_AVAILABLE = False
+
+
+def _ensure_nvml() -> bool:
+    """Lazy-init pynvml exactly once. Returns False if unavailable.
+
+    We deliberately don't fall back to ``torch.cuda.mem_get_info`` —
+    that path can deadlock when called from a thread while vLLM holds
+    the CUDA context. NVML is process-global and lock-free.
+    """
+    global _NVML_INITIALIZED, _NVML_AVAILABLE
+    if _NVML_INITIALIZED:
+        return _NVML_AVAILABLE
+    _NVML_INITIALIZED = True
+    try:
+        import pynvml  # type: ignore
+        pynvml.nvmlInit()
+        _NVML_AVAILABLE = True
+    except Exception:
+        _NVML_AVAILABLE = False
+    return _NVML_AVAILABLE
+
+
+def _gpu_mem_compact(gpu_id: int) -> str:
+    """Return ``"used/total GB"`` or ``"n/a"`` if NVML unavailable.
+
+    Used to embed a low-overhead memory marker into hot-path log lines
+    (PICK / SUB) so a memory leak shows up as a monotonically-growing
+    ``used`` field over the session — without the verbosity of the
+    full ``used:X.X/free:Y.Y/total:Z.Z`` string we use in the vllm
+    adapter heartbeats.
+    """
+    if not _ensure_nvml():
+        return "n/a"
+    try:
+        import pynvml  # type: ignore
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return f"{info.used / 1e9:.1f}/{info.total / 1e9:.0f}GB"
+    except Exception:
+        return "err"
+
+
+# ---------------------------------------------------------------------------
 # Dual-emit: structured logger.info + raw stderr fallback
 # ---------------------------------------------------------------------------
 #
@@ -262,7 +310,13 @@ def _emit(level: int, fmt: str, *args) -> None:
     logger.log(level, msg)
     if _STDERR_FALLBACK_ENABLED:
         try:
-            print(f"[engine] {msg}", file=sys.stderr, flush=True)
+            # Use ``sys.__stderr__`` — the ORIGINAL, never-wrapped file
+            # object — to bypass any tee installed by bittensor's
+            # ``btlogging`` (which mirrors sys.stderr writes back into
+            # the logging framework). Without this, every PICK/SUB
+            # line would print twice once bittensor has been imported.
+            stream = getattr(sys, "__stderr__", None) or sys.stderr
+            print(f"[engine] {msg}", file=stream, flush=True)
         except Exception:
             pass
 
@@ -1047,6 +1101,134 @@ class MiningEngine:
         # window — never retry them in the same window.
         self._superseded_in_window: set[int] = set()
 
+        # Resolve the FULL set of EOS / stop tokens the model may emit.
+        # ``tokenizer.eos_token_id`` is a single int but Qwen3 chat
+        # models stop on EITHER ``<|im_end|>`` (151645) OR
+        # ``<|endoftext|>`` (151643). vLLM honors all entries in
+        # ``generation_config.eos_token_id`` (which is a list for Qwen3);
+        # we MUST match that, otherwise rollouts ending on the secondary
+        # EOS never get truncated and trailing pad tokens (==
+        # ``<|endoftext|>`` == 151643 for Qwen3) survive into the
+        # submission. That's the silent root cause of the
+        # ``clen=max/max/max`` symptom + window_mismatch rejections.
+        self._eos_ids: set[int] = self._resolve_eos_ids()
+        # Flag: in the legacy single-EOS configuration we also strip
+        # trailing pad tokens defensively. Computed once.
+        self._pad_id: int | None = getattr(
+            self.tokenizer, "pad_token_id", None,
+        )
+        logger.info(
+            "engine eos resolution: eos_ids=%s pad_id=%s",
+            sorted(self._eos_ids), self._pad_id,
+        )
+
+        # One-time logger reseat done lazily on first ``mine_window``
+        # iteration after all transitive imports (bittensor / submitter)
+        # have completed. See ``_one_time_logger_reseat``.
+        self._logger_reseated: bool = False
+
+    def _resolve_eos_ids(self) -> set[int]:
+        """Collect every token ID the model treats as a stop token.
+
+        Sources, in order of authority:
+
+        1. ``tokenizer.eos_token_id`` — the canonical primary EOS.
+        2. ``hf_model.generation_config.eos_token_id`` — the full list
+           the model was trained to stop on. For Qwen3 chat models this
+           contains both ``<|im_end|>`` and ``<|endoftext|>``.
+        3. ``vllm_model.generation_config.eos_token_id`` — vLLM caches
+           the same value but exposing through a different attribute
+           path on the adapter; checked as a fallback.
+
+        Returns a non-empty set. If everything fails (no tokenizer, no
+        generation_config), falls back to ``{tokenizer.eos_token_id}``
+        and logs a warning so the operator knows the truncation may
+        miss multi-EOS models.
+        """
+        ids: set[int] = set()
+        eid = getattr(self.tokenizer, "eos_token_id", None)
+        if isinstance(eid, int):
+            ids.add(eid)
+        for src in (self.hf_model, self.vllm_model):
+            gc = getattr(src, "generation_config", None)
+            if gc is None:
+                continue
+            gc_eos = getattr(gc, "eos_token_id", None)
+            if isinstance(gc_eos, (list, tuple)):
+                for x in gc_eos:
+                    if isinstance(x, int):
+                        ids.add(x)
+            elif isinstance(gc_eos, int):
+                ids.add(gc_eos)
+        if not ids:
+            logger.warning(
+                "could not resolve any EOS token from tokenizer or "
+                "generation_config; EOS-based truncation will likely "
+                "fail (you'll see clen=max/max/max in GEN logs)",
+            )
+        return ids
+
+    def _one_time_logger_reseat(self) -> None:
+        """Strip handlers from the loggers we care about, once per process.
+
+        Called from ``mine_window`` AFTER all transitive lazy imports
+        (httpx, reliquary.miner.submitter — which transitively imports
+        bittensor.btlogging) have completed. Any of those imports can:
+
+          1. Reset the root handler list (bittensor's btlogging
+             reconfigures the root logger on import).
+          2. Attach a fresh StreamHandler directly to a NAMED logger
+             (e.g. ``"bittensor"`` or ``"reliquary.miner.submitter"``).
+
+        Case (2) is the silent cause of the "logs appear 2x then 3x
+        over a long session" pattern: with ``propagate=True`` the
+        emission fires once on the named handler AND once again via
+        the root handler. Each subsequent clobber-recover cycle adds
+        another handler.
+
+        Idempotent — guarded by ``self._logger_reseated`` so we only
+        do it once per ``mine_window`` lifecycle. The expensive part
+        (handler enumeration) is microseconds, but keeping it once
+        avoids ever-so-slightly mutating the global logging state on
+        every poll loop tick.
+        """
+        if self._logger_reseated:
+            return
+        self._logger_reseated = True
+
+        # Mirror of main-v4's _PINNED_RELIQUARY_LOGGERS plus a couple of
+        # extras we know third-party imports may have polluted. Kept
+        # local to engine so we don't introduce a circular import.
+        pinned = (
+            "reliquary",
+            "reliquary.miner.engine",
+            "reliquary.miner.submitter",
+            "reliquary.infrastructure.chain",
+            "reliquary.infrastructure.drand",
+            "reliquary.cli",
+            "vllm_adapter",
+            "bittensor",
+            "bittensor.core",
+            "btlogging",
+        )
+        stripped = 0
+        for name in pinned:
+            _lg = logging.getLogger(name)
+            n = len(_lg.handlers)
+            if n:
+                for h in list(_lg.handlers):
+                    _lg.removeHandler(h)
+                stripped += n
+            _lg.propagate = True
+            _lg.disabled = False
+        root = logging.getLogger()
+        _emit(
+            logging.INFO,
+            "[engine.v4] logger reseat: stripped=%d named-logger handlers, "
+            "root_handlers=%d",
+            stripped, len(root.handlers),
+        )
+
     def _maybe_persist_stats(self) -> None:
         """Flush stats every ``_SUMMARY_EVERY`` writes (atomic-replace)."""
         if not self._stats_path:
@@ -1089,6 +1271,14 @@ class MiningEngine:
             BatchSubmissionRequest, WindowState,
         )
 
+        # One-time logger reseat AFTER the submitter / submission /
+        # bittensor-transitive imports above complete. Any of these
+        # imports can re-clobber the root handler or attach a fresh
+        # handler to a named logger; reseating here re-takes ownership
+        # and strips per-logger handlers (which is what produces the
+        # 2× / 3× duplicate log lines observed in long sessions).
+        self._one_time_logger_reseat()
+
         # Early sentinel via both channels so the operator sees we
         # entered the main loop even if the logger is clobbered later.
         _emit(
@@ -1119,7 +1309,21 @@ class MiningEngine:
         local_hash = ""
         last_window_n: int | None = None
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        # Generous HTTP timeouts. Reasoning per leg:
+        #   - connect=10s: long enough to absorb transient DNS / TCP
+        #     handshake hiccups but quickly surfaces a dead validator.
+        #   - read=90s: validator's GRAIL verification can take 30-60 s
+        #     under heavy load (batched_proof_active=True ships 8
+        #     rollouts × up to 8192 tokens). The default 30s timeout
+        #     was producing window_mismatch rejections on perfectly
+        #     good submissions when the validator was slow.
+        #   - write=30s: upload of the ~MB-size proof payload.
+        #   - pool=10s: connection-pool wait.
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=10.0, read=90.0, write=30.0, pool=10.0,
+            ),
+        ) as client:
             while True:
                 try:
                     state = await get_window_state_v2(url, client=client)
@@ -1345,10 +1549,18 @@ class MiningEngine:
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
                 )
+                # GPU mem snapshot BEFORE submit. After-snapshot is
+                # embedded in the SUB line so the operator can compare
+                # `gpu=A/B` (pre) to `gpu=C/B` (post). A C > A trend
+                # across many submissions = the memory leak we
+                # suspected when vLLM KV cache stayed allocated for
+                # over-long padded sequences.
+                gpu_pre = _gpu_mem_compact(self.vllm_gpu)
                 t_http = time.monotonic()
                 try:
                     resp = await submit_batch_v2(url, request, client=client)
                     http_ms = (time.monotonic() - t_http) * 1000.0
+                    gpu_post = _gpu_mem_compact(self.vllm_gpu)
                     reason_str = (
                         resp.reason.value if hasattr(resp.reason, "value")
                         else str(resp.reason)
@@ -1368,11 +1580,12 @@ class MiningEngine:
                         sub_level,
                         "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
                         "sigma=%.3f merkle=%s proof=%s gen=%.1fs proof=%.1fs "
-                        "http=%.2fs -> %s reason=%s",
+                        "http=%.2fs gpu=%s->%s -> %s reason=%s",
                         state.window_n, prompt_idx,
                         _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
                         merkle_root[:8], proof_mode,
                         gen_ms / 1000.0, proof_ms / 1000.0, http_ms / 1000.0,
+                        gpu_pre, gpu_post,
                         status, reason_str,
                     )
                     results.append(resp)
@@ -1562,16 +1775,30 @@ class MiningEngine:
                 top_k=TOP_K_PROTO,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
-        eos = self.tokenizer.eos_token_id
+        # Truncate each row at the first occurrence of ANY known stop
+        # token. Walking from the front (not stripping pads from the
+        # back) handles both:
+        #   - pad_id != any eos_id: pads are skipped past until the real
+        #     eos token shows up; everything from eos onward is dropped.
+        #   - pad_id == an eos_id (Qwen3: pad_id=151643 IS an EOS):
+        #     stripping pads from the back would eat the real eos; but
+        #     scanning from the front finds the model's real eos first
+        #     (since vLLM emits it before any padding starts).
+        # For finish_reason='length' rollouts (no eos in real tokens),
+        # ``cut`` is None and we keep the full gen sequence — which is
+        # already exactly the right length (max_new_tokens of real
+        # tokens, no trailing pads because that row WAS max_len).
+        eos_ids = self._eos_ids
         rollouts: list[dict] = []
         for i in range(n):
             seq = outputs[i].tolist()
             gen = seq[prompt_length:]
-            try:
-                first_eos = gen.index(eos)
-                gen = gen[: first_eos + 1]
-            except ValueError:
-                pass
+            cut: int | None = next(
+                (j for j, t in enumerate(gen) if t in eos_ids),
+                None,
+            )
+            if cut is not None:
+                gen = gen[: cut + 1]
             rollouts.append({
                 "tokens": prompt_tokens + gen,
                 "prompt_length": prompt_length,

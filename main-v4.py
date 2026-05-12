@@ -176,6 +176,13 @@ def _install_root_handler(
     ``setup_logging`` call AND by ``reseat_logging`` AFTER third-party
     imports (bittensor, vllm) to undo any handler clobber they did.
 
+    Also strips handlers from every named logger in
+    ``_PINNED_RELIQUARY_LOGGERS`` — bittensor and vllm sometimes attach
+    handlers directly to specific named loggers (not just root), and if
+    we leave those in place the logger emits via BOTH the named-logger
+    handler and the propagated root handler — producing the duplicate
+    log lines (2x, then 3x) observed in long-running miner sessions.
+
     If ``log_file`` is given, also installs a flushing FileHandler so
     a permanent record exists even when stderr is dropped by the
     surrounding shell/systemd.
@@ -184,7 +191,15 @@ def _install_root_handler(
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    stream_handler = _FlushingStreamHandler(sys.stderr)
+    # Anchor on ``sys.__stderr__`` — the ORIGINAL file object the
+    # interpreter started with. Bittensor's btlogging (transitively
+    # imported via ``reliquary.miner.submitter``) replaces sys.stderr
+    # with a tee that re-emits writes into the logging framework. If
+    # our StreamHandler points at THAT tee, every emission would
+    # recurse back through the logger and produce duplicate lines.
+    # __stderr__ is immutable and bypasses any such tee.
+    _stderr = getattr(sys, "__stderr__", None) or sys.stderr
+    stream_handler = _FlushingStreamHandler(_stderr)
     stream_handler.setLevel(level_int)
     stream_handler.setFormatter(_MillisecondFormatter(
         fmt="%(asctime)s | %(name)s | %(levelname)s | %(message)s"
@@ -209,12 +224,24 @@ def _install_root_handler(
 
     for name in _PINNED_RELIQUARY_LOGGERS:
         _lg = logging.getLogger(name)
+        # CRITICAL: strip per-logger handlers. bittensor/vllm sometimes
+        # attach a StreamHandler directly to a named logger (in
+        # addition to root). With propagate=True (which we set below),
+        # that produces a 2× duplicate per emission. Repeated clobbers
+        # over the session lead to the 3× / 4× pattern.
+        for h in list(_lg.handlers):
+            _lg.removeHandler(h)
         _lg.setLevel(level_int)
         _lg.propagate = True
         _lg.disabled = False
 
     for noisy in _QUIETED_VLLM_LOGGERS:
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+        _lg = logging.getLogger(noisy)
+        # Strip vllm.* handlers too — vllm's dictConfig sometimes
+        # attaches its own colour formatter that races with ours.
+        for h in list(_lg.handlers):
+            _lg.removeHandler(h)
+        _lg.setLevel(logging.WARNING)
 
 
 def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
@@ -261,7 +288,8 @@ def reseat_logging(level: str = "INFO", log_file: str | None = None) -> None:
 
 
 def logging_probe() -> None:
-    """Emit a sentinel line via every channel we care about.
+    """Emit a sentinel line via every channel we care about + a per-logger
+    handler-count audit.
 
     If you can see all of these in your log, every channel is healthy:
 
@@ -270,15 +298,32 @@ def logging_probe() -> None:
         ``LOGGING_PROBE: direct``      — direct stderr write (bypasses
                                          the logging framework entirely)
 
+    The handler audit prints exactly how many handlers each pinned
+    logger has after install/reseat. After ``_install_root_handler``:
+        - root should be 1 (or 2 if ``--log-file`` was given)
+        - every named logger should be 0 (they propagate to root)
+
+    If you see any named logger with > 0 handlers, something attached
+    a handler outside our control and you'll get duplicate emissions.
+
     If the direct line shows but the logger lines don't, a third-party
     library clobbered the root handler. If even the direct line is
     missing, stderr itself is being dropped by your shell/systemd.
     """
-    logging.getLogger().info("LOGGING_PROBE: root")
+    root = logging.getLogger()
+    root.info("LOGGING_PROBE: root (handlers=%d)", len(root.handlers))
     for name in _PINNED_RELIQUARY_LOGGERS:
-        logging.getLogger(name).info("LOGGING_PROBE: %s", name)
-    print("LOGGING_PROBE: direct (bypasses logging framework)",
-          file=sys.stderr, flush=True)
+        _lg = logging.getLogger(name)
+        _lg.info(
+            "LOGGING_PROBE: %s (own_handlers=%d propagate=%s)",
+            name, len(_lg.handlers), _lg.propagate,
+        )
+    _stderr = getattr(sys, "__stderr__", None) or sys.stderr
+    print(
+        f"LOGGING_PROBE: direct (bypasses logging framework, "
+        f"root_handlers={len(root.handlers)})",
+        file=_stderr, flush=True,
+    )
 
 
 # ---------------------------------------------------------------------------
