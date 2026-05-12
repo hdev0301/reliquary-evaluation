@@ -4,7 +4,7 @@ Protocol v2: free prompt selection (uniform random with cooldown skip),
 M rollouts per prompt at fixed temperature T_PROTO, local reward computation,
 Merkle root commitment, HTTP batch submission to validator.
 
-This evaluation contains five corrections over the upstream reference
+This evaluation contains six corrections over the upstream reference
 miner that materially improve a miner's acceptance rate:
 
   1. Per-window GRAIL randomness. The validator derives sketch randomness
@@ -20,8 +20,11 @@ miner that materially improve a miner's acceptance rate:
      keeps an unseen-prompt exploration tail via the Beta(1,1) prior.
   3. Local OUT_OF_ZONE short-circuit. Even with the picker, some groups
      land out-of-zone; submitting them is a deterministic OUT_OF_ZONE
-     reject and burns time in the SUPERSEDED race for the next prompt.
-     We compute σ locally and skip the HTTP round-trip when σ < SIGMA_MIN.
+     reject. We use ``verifier.rewards_std`` and ``verifier.is_in_zone``
+     (default ``bootstrap=False``, i.e. steady σ ≥ ``SIGMA_MIN`` from
+     ``reliquary.constants``, plus the validator's σ < 1e⁻⁸ degenerate
+     rule) so the local gate matches production batchers. Logs still cite
+     ``SIGMA_MIN`` for the human-readable threshold.
   4. Probe-then-continue rollout generation with Bayesian abort. Instead
      of always paying for M_ROLLOUTS=8 rollouts up-front, we generate
      ``_PROBE_SIZE=3`` first and decide whether to fill out the group by
@@ -37,6 +40,11 @@ miner that materially improve a miner's acceptance rate:
      accumulates across sessions; without persistence, a restart resets
      σ-yield to its initial uniform-random behaviour. Stats are saved
      atomically every ``_SUMMARY_EVERY`` attempts and loaded on startup.
+  6. Long-tail completion penalty (picker). Per-prompt max observed
+     completion length is persisted; prompts that ever hit ≥
+     ``_LONG_COMPLETION_THRESHOLD_TOKENS`` get score ×
+     ``_LONG_COMPLETION_PENALTY`` in ``pick_prompt_idx`` so the miner avoids
+     prompts prone to maximal-length chatter.
 """
 
 from __future__ import annotations
@@ -64,6 +72,7 @@ from reliquary.protocol.submission import (
     BatchSubmissionRequest,
     RolloutSubmission,
 )
+from reliquary.validator.verifier import is_in_zone, rewards_std
 
 if TYPE_CHECKING:
     from reliquary.environment.base import Environment
@@ -105,6 +114,12 @@ _PROBE_WARM_THRESHOLD = 5
 # construction; the miner can override via the ``stats_path`` kwarg (set to
 # ``None`` to disable persistence).
 _DEFAULT_STATS_PATH = ".reliquary_miner_stats.json"
+
+# Down-rank prompts whose rollouts have ever exceeded this completion length
+# (tokens). Mirrors v4/top-miner traces: runway generations waste GPU without
+# improving in-zone odds. Does not alter the env prompt (validator binding safe).
+_LONG_COMPLETION_THRESHOLD_TOKENS: int = 5600
+_LONG_COMPLETION_PENALTY: float = 0.42
 
 
 @dataclass
@@ -213,22 +228,14 @@ class _MinerMetrics:
 
 
 def _zone_status(rewards: list[float]) -> tuple[float, int, bool]:
-    """Compute (sigma, k_solved, in_zone) for a rollout group.
+    """Compute (sigma, k_solved, in_zone) matching the validator's steady gate.
 
-    ``k_solved`` is the number of rollouts with reward >= 0.5; under the
-    math env's binary reward this is the only thing that matters for the
-    validator's ``rewards_std`` and ``is_in_zone`` gates. We replicate the
-    same population-stddev formula the validator uses (see
-    ``validator/verifier.py::rewards_std``).
+    Uses ``rewards_std`` and ``is_in_zone(sigma)`` — ``bootstrap`` defaults
+    to ``False``, so the cutoff is ``SIGMA_MIN`` from shared constants.
     """
-    n = len(rewards)
-    if n < 2:
-        return 0.0, 0, False
-    mean = sum(rewards) / n
-    variance = sum((r - mean) ** 2 for r in rewards) / n
-    sigma = variance ** 0.5
     k_solved = sum(1 for r in rewards if r >= 0.5)
-    return sigma, k_solved, sigma >= SIGMA_MIN
+    sigma = rewards_std(rewards)
+    return sigma, k_solved, is_in_zone(sigma)
 
 
 async def maybe_pull_checkpoint(
@@ -355,16 +362,19 @@ class _PromptStats:
 
     Also tracks a running mean of completion length per prompt; the picker
     can use this as a tiebreak to favour faster-to-solve prompts (winning
-    the validator's TCP-arrival SUPERSEDED race more often).
+    the validator's TCP-arrival SUPERSEDED race more often). Max observed
+    completion length per prompt is stored so long-runway prompts can be
+    down-ranked (see ``_LONG_COMPLETION_*``).
     """
 
-    __slots__ = ("alpha_prior", "beta_prior", "_counts", "_lengths")
+    __slots__ = ("alpha_prior", "beta_prior", "_counts", "_lengths", "_max_lens")
 
     def __init__(self, alpha_prior: float = 1.0, beta_prior: float = 1.0) -> None:
         self.alpha_prior = alpha_prior
         self.beta_prior = beta_prior
         self._counts: dict[int, tuple[int, int]] = {}        # idx → (solves, attempts)
         self._lengths: dict[int, tuple[float, int]] = {}     # idx → (mean_len, n)
+        self._max_lens: dict[int, int] = {}                  # idx → max completion len seen
 
     def record_group(
         self,
@@ -383,6 +393,10 @@ class _PromptStats:
             total_n = prev_n + len(completion_lens)
             new_mean = (prev_mean * prev_n + sum(completion_lens)) / total_n
             self._lengths[prompt_idx] = (new_mean, total_n)
+            cur_max = max(completion_lens)
+            stored_max = self._max_lens.get(prompt_idx)
+            if stored_max is None or cur_max > stored_max:
+                self._max_lens[prompt_idx] = cur_max
 
     def posterior(self, prompt_idx: int) -> tuple[float, float]:
         """Return ``(α, β)`` of the Beta posterior for *prompt_idx*."""
@@ -408,6 +422,10 @@ class _PromptStats:
     def avg_completion_len(self, prompt_idx: int) -> float | None:
         v = self._lengths.get(prompt_idx)
         return v[0] if v else None
+
+    def has_long_completion(self, prompt_idx: int, threshold: int) -> bool:
+        m = self._max_lens.get(prompt_idx)
+        return m is not None and m >= threshold
 
     def warmed_count(self, min_attempts: int = 5) -> tuple[int, int]:
         """Return ``(warmed, observed)`` — count of prompts with ≥
@@ -438,6 +456,7 @@ class _PromptStats:
             "beta_prior": self.beta_prior,
             "counts": {str(k): list(v) for k, v in self._counts.items()},
             "lengths": {str(k): list(v) for k, v in self._lengths.items()},
+            "max_lens": {str(k): v for k, v in self._max_lens.items()},
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -472,6 +491,10 @@ class _PromptStats:
             int(k): (float(v[0]), int(v[1]))
             for k, v in (payload.get("lengths") or {}).items()
         }
+        self._max_lens = {
+            int(k): int(v)
+            for k, v in (payload.get("max_lens") or {}).items()
+        }
         return True
 
 
@@ -499,6 +522,9 @@ def pick_prompt_idx(
        are broken in favour of shorter average completion length when
        known (faster generation → more SUPERSEDED wins on subsequent
        prompts in the same window).
+    4. Prompts whose historical rollouts have ever reached completion
+       length ≥ ``_LONG_COMPLETION_THRESHOLD_TOKENS`` multiply the sampled
+       in-zone score by ``_LONG_COMPLETION_PENALTY`` before comparison.
 
     ``candidates=32`` is a deliberate balance: large enough that warm
     prompts (concentrated Beta near p≈0.5, zone_p≈0.99) consistently
@@ -551,6 +577,8 @@ def pick_prompt_idx(
         seen.add(idx)
         p_sampled = stats.sample_p(idx, rng)
         score = _zone_probability(p_sampled)
+        if stats.has_long_completion(idx, _LONG_COMPLETION_THRESHOLD_TOKENS):
+            score *= _LONG_COMPLETION_PENALTY
         if score > best_score:
             best_idx, best_score = idx, score
             best_len = stats.avg_completion_len(idx) or float("inf")
@@ -957,13 +985,7 @@ class MiningEngine:
                     max(completion_lens),
                 )
 
-                # Local short-circuit: if our own rewards distribution can't
-                # clear the validator's zone gate, skip the HTTP round-trip
-                # entirely — the verdict is deterministic OUT_OF_ZONE and we
-                # save bandwidth + lose less ground on the SUPERSEDED race
-                # for the next prompt. Bootstrap-window's relaxed threshold
-                # is ignored here intentionally; the steady-state cost of
-                # the extra check is one submission per ~100 windows.
+                # Local short-circuit: ``is_in_zone`` default (steady, σ ≥ SIGMA_MIN).
                 if not in_zone:
                     self._metrics.record_local_oos()
                     logger.info(
