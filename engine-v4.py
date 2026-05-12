@@ -870,6 +870,12 @@ class _PromptStats:
         "_last_checkpoint",
         "_cohort_counts",
         "_cohort_last_checkpoint",
+        # Per-cohort empirical in-zone rate: (inzone_count, total_groups).
+        # Tracks how often a cohort produces a group with k ∈ [K_LO, K_HI]
+        # (the zone gate). Used by the picker to multiply zone_p by the
+        # cohort's empirical hit rate, discounting cohorts that consistently
+        # return k=0 or k=8 even when the per-prompt phat looks marginal.
+        "_cohort_inzone",
         "_lengths",
         "_min_lens",
         "_arrival_ema",
@@ -885,6 +891,7 @@ class _PromptStats:
         self._last_checkpoint: dict[int, int] = {}
         self._cohort_counts: dict[tuple[str, str], tuple[int, int]] = {}
         self._cohort_last_checkpoint: dict[tuple[str, str], int] = {}
+        self._cohort_inzone: dict[tuple[str, str], tuple[int, int]] = {}
         self._lengths: dict[int, tuple[float, int]] = {}
         # Minimum observed completion length per prompt. Used by the
         # picker to down-rank prompts that have ever produced a rollout
@@ -1064,6 +1071,16 @@ class _PromptStats:
         self._cohort_counts[key] = (cs + solves, cn + attempts)
         self._cohort_last_checkpoint[key] = checkpoint_n
 
+        # Cohort in-zone empirical rate. Track whether the submitted
+        # *group* was in-zone. Each call to record_group represents one
+        # generation attempt with M=8 rollouts; we record 1 group.
+        _, _, group_inzone = _zone_status(rewards)
+        ciz, ctot = self._cohort_inzone.get(key, (0, 0))
+        self._cohort_inzone[key] = (
+            ciz + (1 if group_inzone else 0),
+            ctot + 1,
+        )
+
         # Cohort cache for picker hot path
         self._cohort_cache[prompt_idx] = (str(level), str(subject))
 
@@ -1134,6 +1151,27 @@ class _PromptStats:
         total = sum(n for _, n in self._cohort_counts.values())
         return total, len(self._cohort_counts)
 
+    def cohort_inzone_rate(
+        self,
+        level: str,
+        subject: str,
+        min_groups: int = 5,
+    ) -> float | None:
+        """Empirical in-zone rate for the (level, subject) cohort.
+
+        Returns the fraction of groups from this cohort that landed in
+        zone (k ∈ [K_LO, K_HI]). Returns ``None`` when fewer than
+        ``min_groups`` groups have been attempted (not enough signal to
+        trust). The picker multiplies ``zone_p`` by this value to
+        discount cohorts that consistently produce saturated k=0/8 even
+        when the per-prompt phat looks marginal.
+        """
+        key = self._cohort_key(level, subject)
+        iz, tot = self._cohort_inzone.get(key, (0, 0))
+        if tot < min_groups:
+            return None
+        return (iz + 0.5) / (tot + 1.0)  # Laplace-smoothed
+
     # ------------------------- persistence -------------------------
 
     def save_to(self, path: str) -> None:
@@ -1160,6 +1198,10 @@ class _PromptStats:
             "cohort_last_checkpoint": {
                 f"{level}\t{subject}": v
                 for (level, subject), v in self._cohort_last_checkpoint.items()
+            },
+            "cohort_inzone": {
+                f"{level}\t{subject}": list(v)
+                for (level, subject), v in self._cohort_inzone.items()
             },
             "lengths": {str(k): list(v) for k, v in self._lengths.items()},
             "min_lens": {str(k): v for k, v in self._min_lens.items()},
@@ -1230,6 +1272,10 @@ class _PromptStats:
             raw_clc = _parse_cohort(payload.get("cohort_last_checkpoint"))
             self._cohort_last_checkpoint = {
                 key: int(v) for key, v in raw_clc.items()
+            }
+            raw_ciz = _parse_cohort(payload.get("cohort_inzone") or {})
+            self._cohort_inzone = {
+                key: (int(v[0]), int(v[1])) for key, v in raw_ciz.items()
             }
             self._arrival_ema = {
                 int(k): float(v)
@@ -1369,6 +1415,17 @@ def pick_prompt_idx(
         zone_p = _zone_probability(p_sampled)
         arrival_z = stats.arrival_rate(idx)
         score = zone_p * (1.0 - _CONGESTION_WEIGHT * arrival_z)
+
+        # Cohort empirical in-zone rate multiplier. When a cohort has
+        # produced ≥ 5 group attempts and its empirical in-zone rate is
+        # below 1.0 (e.g., L2,Geometry routinely yields k=8), multiply
+        # score by the Laplace-smoothed rate. This correctly discounts
+        # cohorts whose per-rollout phat yields zone_p=0.90 in theory but
+        # whose observed in-zone rate is only 10-20% because the model
+        # is actually p≈0.95 on those problems (landing k=7/8 or k=8/8).
+        ciz_rate = stats.cohort_inzone_rate(level, subject)
+        if ciz_rate is not None:
+            score *= ciz_rate
 
         # Short-completion penalty. Prompts that have ever produced
         # a rollout shorter than CHALLENGE_K=32 are high-risk for
@@ -1999,13 +2056,48 @@ class MiningEngine:
                             state.window_n, prompt_idx,
                             k_solved, M_ROLLOUTS,
                         )
-                    elif overgen_open_age_s > _OVERGEN_MAX_OPEN_AGE_S:
+                    elif overgen_open_age_s > (
+                        # Dynamic CHRY deadline: how much of the OPEN
+                        # budget remains after http + proof + overgen
+                        # cost? This is tighter than the static
+                        # _OVERGEN_MAX_OPEN_AGE_S = 120 s cap, which
+                        # was leaving too little headroom when
+                        # http_avg ≈ 70 s but cutting too aggressively
+                        # when http_avg is low.
+                        #
+                        # Formula: budget - http_avg - proof_avg - overgen_est.
+                        # Clamped to [60 s, budget × 0.8] so we always
+                        # allow over-gen early in the window but never
+                        # push the total pipeline past 80% of budget.
+                        _chry_deadline := max(
+                            60.0,
+                            min(
+                                float(_OPEN_PHASE_BUDGET_S) * 0.8,
+                                float(_OPEN_PHASE_BUDGET_S)
+                                - max(
+                                    _DEADLINE_HTTP_DEFAULT_S,
+                                    self._metrics.recent_http_avg_s(),
+                                )
+                                - max(
+                                    _DEADLINE_PROOF_DEFAULT_S,
+                                    self._metrics.recent_proof_avg_s(),
+                                )
+                                # Estimate overgen time proportional to
+                                # the just-completed generation time.
+                                - max(
+                                    5.0,
+                                    (_OVERGEN_EXTRA / M_ROLLOUTS)
+                                    * (gen_ms / 1000.0),
+                                ),
+                            ),
+                        )
+                    ):
                         _emit(
                             logging.INFO,
                             "[W=%d] CHRY prompt=%-4d skipped "
                             "(open_age=%.1fs>%.1fs deadline) k=%d/%d",
                             state.window_n, prompt_idx,
-                            overgen_open_age_s, _OVERGEN_MAX_OPEN_AGE_S,
+                            overgen_open_age_s, _chry_deadline,
                             k_solved, M_ROLLOUTS,
                         )
                     else:
@@ -2107,30 +2199,152 @@ class MiningEngine:
                 # silently fails with ``LOGPROB_MISMATCH`` deep in the
                 # async worker (the miner never sees that verdict — the
                 # /submit response is the provisional SUBMITTED sentinel).
-                # Skip the submit when ANY rollout in the group is too
-                # short, so we don't waste an HTTP round-trip + window
-                # slot on a doomed submission.
                 #
                 # A rollout that ends with EOS at length < 32 is the
                 # ONLY case this catches: those pass termination Path 2
                 # and reach the logprob check. ``finish=length`` rollouts
                 # are at completion_length = effective_max_new (always
                 # >> 32), so they're never the short one.
+                #
+                # SHRT rescue: when ≤ 2 rollouts in an otherwise in-zone
+                # group are short, generate replacement(s) rather than
+                # discarding the whole attempt. The replacement is honest
+                # (same protocol temperature), so statistical validity is
+                # preserved. Gated by the same dynamic deadline used for
+                # CHRY so we don't push the submit past the window edge.
                 min_clen = min(completion_lens)
                 if min_clen < CHALLENGE_K:
-                    _emit(
-                        logging.INFO,
-                        "[W=%d] SHRT prompt=%-4d min_clen=%d<%d -> skip submit "
-                        "(would fail validator LOGPROB_MISMATCH)",
-                        state.window_n, prompt_idx, min_clen, CHALLENGE_K,
+                    short_idxs = [
+                        i for i, cl in enumerate(completion_lens)
+                        if cl < CHALLENGE_K
+                    ]
+                    shrt_open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if self._window_open_seen_at is not None
+                        else float("inf")
                     )
-                    if self._metrics.generated % _SUMMARY_EVERY == 0:
+                    _http_s_shrt = max(
+                        _DEADLINE_HTTP_DEFAULT_S,
+                        self._metrics.recent_http_avg_s(),
+                    )
+                    _proof_s_shrt = max(
+                        _DEADLINE_PROOF_DEFAULT_S,
+                        self._metrics.recent_proof_avg_s(),
+                    )
+                    _repl_est_s = max(
+                        2.0,
+                        (len(short_idxs) / M_ROLLOUTS) * (gen_ms / 1000.0),
+                    )
+                    _shrt_deadline = max(
+                        60.0,
+                        min(
+                            float(_OPEN_PHASE_BUDGET_S) * 0.8,
+                            float(_OPEN_PHASE_BUDGET_S)
+                            - _http_s_shrt - _proof_s_shrt - _repl_est_s,
+                        ),
+                    )
+                    rescued = False
+                    if len(short_idxs) <= 2 and shrt_open_age_s <= _shrt_deadline:
+                        try:
+                            repl_gens = self._generate_n_rollouts(
+                                problem, len(short_idxs),
+                            )
+                        except Exception as _shrt_exc:
+                            repl_gens = []
+                            logger.debug("SHRT rescue gen failed: %s", _shrt_exc)
+                        if len(repl_gens) == len(short_idxs):
+                            repl_scored = [
+                                self._score_rollout(g, problem)
+                                for g in repl_gens
+                            ]
+                            repl_rewards = [r for r, _ in repl_scored]
+                            repl_lens = [l for _, l in repl_scored]
+                            self._prompt_stats.record_group(
+                                prompt_idx, repl_rewards,
+                                level=level, subject=subject,
+                                checkpoint_n=state.checkpoint_n,
+                                completion_lens=repl_lens,
+                            )
+                            new_gens = list(generations)
+                            new_rews = list(rewards)
+                            new_clens = list(completion_lens)
+                            for pos, (rg, rr, rl) in zip(
+                                short_idxs,
+                                zip(repl_gens, repl_rewards, repl_lens),
+                            ):
+                                new_gens[pos] = rg
+                                new_rews[pos] = rr
+                                new_clens[pos] = rl
+                            new_min = min(new_clens)
+                            new_sigma, new_k, new_inzone = _zone_status(new_rews)
+                            if new_min >= CHALLENGE_K and new_inzone:
+                                generations = new_gens
+                                rewards = new_rews
+                                completion_lens = new_clens
+                                sigma = new_sigma
+                                k_solved = new_k
+                                in_zone = True
+                                rescued = True
+                                _emit(
+                                    logging.INFO,
+                                    "[W=%d] SHRT prompt=%-4d rescued %d short "
+                                    "rollout(s) k=%d/%d sigma=%.3f "
+                                    "clen=%d/%d/%d",
+                                    state.window_n, prompt_idx,
+                                    len(short_idxs), k_solved, M_ROLLOUTS,
+                                    sigma,
+                                    min(completion_lens),
+                                    sorted(completion_lens)[
+                                        len(completion_lens) // 2
+                                    ],
+                                    max(completion_lens),
+                                )
+                            else:
+                                _emit(
+                                    logging.INFO,
+                                    "[W=%d] SHRT prompt=%-4d rescue failed "
+                                    "(new_min=%d in_zone=%s) -> skip",
+                                    state.window_n, prompt_idx,
+                                    new_min, new_inzone,
+                                )
+                    if not rescued:
                         _emit(
                             logging.INFO,
-                            "=== SUMMARY === %s",
-                            self._metrics.summary(self._prompt_stats),
+                            "[W=%d] SHRT prompt=%-4d min_clen=%d<%d -> skip submit "
+                            "(would fail validator LOGPROB_MISMATCH)",
+                            state.window_n, prompt_idx, min_clen, CHALLENGE_K,
                         )
-                    continue
+                        if self._metrics.generated % _SUMMARY_EVERY == 0:
+                            _emit(
+                                logging.INFO,
+                                "=== SUMMARY === %s",
+                                self._metrics.summary(self._prompt_stats),
+                            )
+                        continue
+
+                # Fast pre-proof window guard. Check window state RIGHT
+                # NOW — before spending 2-3 s building the proof —
+                # so we can abort early when the window already closed
+                # during generation or CHRY. The second /state check
+                # below (after proof) catches the smaller race of the
+                # window advancing *during* proof construction.
+                try:
+                    early_state = await get_window_state_v2(url, client=client)
+                    if early_state.window_n != state.window_n:
+                        _emit(
+                            logging.WARNING,
+                            "[W=%d] SKIP prompt=%-4d window advanced to %d "
+                            "before proof (gen=%.1fs) — saved proof build",
+                            state.window_n, prompt_idx,
+                            early_state.window_n,
+                            gen_ms / 1000.0,
+                        )
+                        continue
+                except SubmissionError as _early_exc:
+                    logger.debug(
+                        "pre-proof state check failed: %s; proceeding to proof",
+                        _early_exc,
+                    )
 
                 # Build GRAIL proofs.
                 t_proof = time.monotonic()
