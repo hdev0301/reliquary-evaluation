@@ -153,6 +153,80 @@ class _MillisecondFormatter(logging.Formatter):
         return f"{s}.{int(record.msecs):03d}"
 
 
+class _DedupeFilter(logging.Filter):
+    """Drop a record if an IDENTICAL one was emitted within a short window.
+
+    Defends against the duplicate-log pathology observed when bittensor's
+    btlogging (or any other lib) attaches a handler to a named logger
+    in addition to root, OR replaces sys.stderr with a tee that re-emits
+    writes through the logging framework. With either pattern, a single
+    ``logger.info(msg)`` produces 2+ visible lines at the same
+    millisecond timestamp.
+
+    Implemented as a filter on the root StreamHandler so it applies to
+    every record routed through our handler — regardless of which named
+    logger emitted it, and regardless of any rogue per-logger handler
+    that might also be attached. (Records emitted ONLY through rogue
+    handlers are still duplicated; that channel is handled by the
+    periodic handler-strip in engine-v4's ``_emit``.)
+
+    Keyed by (logger_name, levelno, msg) — different messages at the
+    same timestamp are still emitted normally.
+    """
+
+    def __init__(self, window_s: float = 0.5) -> None:
+        super().__init__()
+        self._window_s = window_s
+        self._last: dict[tuple[str, int, str], float] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True  # don't drop on format errors
+        key = (record.name, record.levelno, msg)
+        now = time.monotonic()
+        last_t = self._last.get(key)
+        if last_t is not None and (now - last_t) < self._window_s:
+            self._last[key] = now
+            return False
+        self._last[key] = now
+        # Cheap periodic GC so the dict doesn't grow forever.
+        if len(self._last) > 1024:
+            cutoff = now - 60.0
+            for k in [k for k, t in self._last.items() if t < cutoff]:
+                del self._last[k]
+        return True
+
+
+# Bulletproof direct-write fd captured at module import time. This MUST
+# happen before any third-party library (bittensor, vllm, transformers)
+# has a chance to redirect fd 2 via dup2 or wrap sys.stderr. Captured
+# here at top of main-v4 — which is always the first reliquary module
+# loaded — guarantees the dup happens before any reseat could fire.
+try:
+    _RAW_STDERR_FD: int | None = os.dup(2)
+except OSError:
+    _RAW_STDERR_FD = None
+
+
+def _raw_stderr_write(line: str) -> None:
+    """Write directly to the captured-at-import fd 2 dup, bypassing any
+    Python-level stream wrap. See ``_RAW_STDERR_FD`` for rationale.
+    """
+    if not line.endswith("\n"):
+        line = line + "\n"
+    try:
+        if _RAW_STDERR_FD is not None:
+            os.write(_RAW_STDERR_FD, line.encode("utf-8", "replace"))
+        else:
+            stream = getattr(sys, "__stderr__", None) or sys.stderr
+            stream.write(line)
+            stream.flush()
+    except Exception:
+        pass
+
+
 _PINNED_RELIQUARY_LOGGERS = (
     "reliquary",
     "reliquary.miner.engine",
@@ -191,19 +265,36 @@ def _install_root_handler(
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    # Anchor on ``sys.__stderr__`` — the ORIGINAL file object the
-    # interpreter started with. Bittensor's btlogging (transitively
-    # imported via ``reliquary.miner.submitter``) replaces sys.stderr
-    # with a tee that re-emits writes into the logging framework. If
-    # our StreamHandler points at THAT tee, every emission would
-    # recurse back through the logger and produce duplicate lines.
-    # __stderr__ is immutable and bypasses any such tee.
-    _stderr = getattr(sys, "__stderr__", None) or sys.stderr
+    # Anchor on the IMPORT-TIME duped fd. ``sys.__stderr__`` is mutable
+    # and some libraries (notably bittensor.btlogging) DO reassign it.
+    # Our captured ``_RAW_STDERR_FD`` is an OS-level duplicate of fd 2
+    # taken at module import — before any third-party code ran — so it
+    # always points at the original kernel stderr. Wrap it in a Python
+    # file object so StreamHandler can write to it.
+    if _RAW_STDERR_FD is not None:
+        try:
+            _stderr = os.fdopen(
+                os.dup(_RAW_STDERR_FD), "w",
+                encoding="utf-8", errors="replace",
+                buffering=1,  # line buffered
+            )
+        except OSError:
+            _stderr = getattr(sys, "__stderr__", None) or sys.stderr
+    else:
+        _stderr = getattr(sys, "__stderr__", None) or sys.stderr
+
     stream_handler = _FlushingStreamHandler(_stderr)
     stream_handler.setLevel(level_int)
     stream_handler.setFormatter(_MillisecondFormatter(
         fmt="%(asctime)s | %(name)s | %(levelname)s | %(message)s"
     ))
+    # Install dedupe filter on our handler — drops records identical
+    # to one we emitted within 500 ms, which kills the duplicate-log
+    # pathology that arises when bittensor/vllm attach an extra
+    # handler to a named logger (in addition to root). Without this
+    # filter, ``logger.info(msg)`` would emit through both handlers
+    # and our root handler would see the record twice.
+    stream_handler.addFilter(_DedupeFilter(window_s=0.5))
     root.addHandler(stream_handler)
 
     if log_file:
@@ -213,11 +304,15 @@ def _install_root_handler(
             file_handler.setFormatter(_MillisecondFormatter(
                 fmt="%(asctime)s | %(name)s | %(levelname)s | %(message)s"
             ))
+            # File handler shares the same dedupe (separate filter
+            # instance so its dedupe map is independent of the stream
+            # handler's). Same effect: identical records within 500 ms
+            # are dropped.
+            file_handler.addFilter(_DedupeFilter(window_s=0.5))
             root.addHandler(file_handler)
         except OSError as e:
-            print(
-                f"[reliquary.cli] WARN could not open log file {log_file!r}: {e}",
-                file=sys.stderr, flush=True,
+            _raw_stderr_write(
+                f"[reliquary.cli] WARN could not open log file {log_file!r}: {e}"
             )
 
     root.setLevel(level_int)
@@ -318,11 +413,9 @@ def logging_probe() -> None:
             "LOGGING_PROBE: %s (own_handlers=%d propagate=%s)",
             name, len(_lg.handlers), _lg.propagate,
         )
-    _stderr = getattr(sys, "__stderr__", None) or sys.stderr
-    print(
+    _raw_stderr_write(
         f"LOGGING_PROBE: direct (bypasses logging framework, "
-        f"root_handlers={len(root.handlers)})",
-        file=_stderr, flush=True,
+        f"root_handlers={len(root.handlers)})"
     )
 
 
@@ -540,11 +633,10 @@ def mine(
     """Run Reliquary miner (HF by default; pass --use-vllm for vLLM backend)."""
     # Earliest possible signs of life — these go straight to stderr in
     # case anything below this point hangs before setup_logging completes.
-    print(
+    _raw_stderr_write(
         f"[reliquary.cli] mine starting backend={'vllm' if use_vllm else 'hf'} "
         f"network={network} netuid={netuid} log_level={log_level} "
-        f"log_file={log_file or '<none>'}",
-        file=sys.stderr, flush=True,
+        f"log_file={log_file or '<none>'}"
     )
 
     setup_logging(log_level, log_file=(log_file or None))
@@ -564,8 +656,9 @@ def mine(
         # transitive import) reinstalls the root logger handlers, which
         # silently kills our FlushingStreamHandler. We re-take ownership
         # right after these imports complete with reseat_logging().
-        print("[reliquary.cli] _run() entered — importing third-party libs",
-              file=sys.stderr, flush=True)
+        _raw_stderr_write(
+            "[reliquary.cli] _run() entered — importing third-party libs"
+        )
         import bittensor as bt
         import torch
         from transformers import AutoTokenizer

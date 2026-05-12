@@ -59,6 +59,7 @@ unchanged.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import time
@@ -88,26 +89,59 @@ _GENERATE_HEARTBEAT_SETTLED_INTERVAL_S = 30.0
 _GENERATE_HEARTBEAT_FRESH_DURATION_S = 0.0
 
 
+# Bulletproof direct-write fd captured at module import time — i.e.
+# before bittensor / vllm / transformers had any chance to replace
+# sys.stderr or sys.__stderr__. ``os.dup(2)`` returns a NEW file
+# descriptor pointing at the underlying kernel stderr. Even if a
+# third-party lib does ``dup2(pipe_write, 2)`` to redirect stderr (as
+# bittensor's btlogging is known to do), our captured fd STILL points
+# at the original stderr, so ``os.write(_FD, ...)`` cannot be
+# intercepted or replayed. This is the only Python-level technique
+# that survives arbitrary userspace stream wrapping.
+try:
+    _RAW_STDERR_FD: int | None = os.dup(2)
+except OSError:
+    _RAW_STDERR_FD = None
+
+# Dedupe ring — drop identical (logger, msg) pairs emitted within
+# this window. Defends against any duplication mechanism we haven't
+# diagnosed yet (e.g. an upstream lib that hooks stderr at the C
+# layer BEFORE our os.dup runs).
+_DEDUPE_WINDOW_S = 0.5
+_dedupe_last: dict[str, float] = {}
+
+
 def _stderr_print(msg: str) -> None:
-    """Belt-and-suspenders direct write to stderr.
+    """Direct write to the kernel-level stderr fd, bypassing every
+    Python-side stream wrap (sys.stderr, sys.__stderr__, any tee
+    installed by btlogging, etc.).
 
-    Writes to ``sys.__stderr__`` (the original, never-replaced file
-    object) instead of ``sys.stderr``. Bittensor's ``btlogging`` module
-    — which gets pulled in as soon as ``reliquary.miner.submitter`` is
-    imported — replaces ``sys.stderr`` with a tee that ALSO emits the
-    write back through Python's logging framework. So a single
-    ``print(..., file=sys.stderr)`` ends up producing TWO observable
-    lines (one direct, one re-emitted via the root handler) — which is
-    the silent root cause of the "vllm_adapter logs appear 2× then 3×"
-    pattern. Using ``sys.__stderr__`` defeats the tee.
+    Used by heartbeats and a few sentinel log lines so they remain
+    visible even if the logging framework is in a broken state. Routine
+    log lines go through ``logger.info`` instead.
 
-    Even if the root logger is misconfigured (vLLM ate our handler,
-    bittensor reset it, etc.), this still produces visible output.
-    Used only by heartbeats; routine log lines go through the logger.
+    Includes a 500 ms dedupe so an identical message can't appear
+    twice in quick succession — backstop against the duplicate-log
+    pathology if a stderr tee got installed BEFORE our os.dup ran.
     """
+    now = time.monotonic()
+    last_t = _dedupe_last.get(msg)
+    if last_t is not None and (now - last_t) < _DEDUPE_WINDOW_S:
+        _dedupe_last[msg] = now
+        return
+    _dedupe_last[msg] = now
+    if len(_dedupe_last) > 128:
+        cutoff = now - 60.0
+        for k in [k for k, t in _dedupe_last.items() if t < cutoff]:
+            del _dedupe_last[k]
+    line = msg if msg.endswith("\n") else msg + "\n"
     try:
-        stream = getattr(sys, "__stderr__", None) or sys.stderr
-        print(msg, file=stream, flush=True)
+        if _RAW_STDERR_FD is not None:
+            os.write(_RAW_STDERR_FD, line.encode("utf-8", "replace"))
+        else:
+            stream = getattr(sys, "__stderr__", None) or sys.stderr
+            stream.write(line)
+            stream.flush()
     except Exception:
         pass
 

@@ -106,6 +106,8 @@ from typing import TYPE_CHECKING
 import random as _random
 
 from reliquary.constants import (
+    BLOCK_TIME_SECONDS,
+    CHALLENGE_K,
     LAYER_INDEX,
     MAX_NEW_TOKENS_PROTOCOL_CAP,
     M_ROLLOUTS,
@@ -113,7 +115,14 @@ from reliquary.constants import (
     T_PROTO,
     TOP_K_PROTO,
     TOP_P_PROTO,
+    WINDOW_LENGTH,
 )
+
+# Estimated maximum OPEN-phase duration in seconds. ``WINDOW_LENGTH``
+# blocks at ``BLOCK_TIME_SECONDS`` each, plus a generous safety margin
+# for slow block production. Used to log ``open_age`` context in PICK
+# and to surface "submission is racing the window edge" diagnostics.
+_OPEN_PHASE_BUDGET_S = WINDOW_LENGTH * BLOCK_TIME_SECONDS  # = 5 * 12 = 60s
 from reliquary.infrastructure import chain
 from reliquary.protocol.submission import (
     BatchSubmissionRequest,
@@ -291,14 +300,127 @@ def _gpu_mem_compact(gpu_id: int) -> str:
 
 _STDERR_FALLBACK_ENABLED = os.environ.get("RELIQUARY_NO_STDERR", "") == ""
 
+# Bulletproof direct-write fd, captured at MODULE IMPORT time — i.e.
+# before bittensor / vllm / transformers had any chance to wrap or
+# replace ``sys.stderr`` / ``sys.__stderr__``. ``os.dup(2)`` returns a
+# NEW file descriptor pointing at the same underlying file as fd 2.
+# After third-party libs do ``dup2(pipe_write, 2)`` to redirect stderr
+# (which is what e.g. bittensor's btlogging does when it captures
+# stderr to re-emit through its own logger), our captured fd STILL
+# points at the original kernel-level stderr — so ``os.write(_FD2,
+# ...)`` cannot be intercepted, recursed, or replayed by any Python
+# layer. This is the only Python-level technique that survives
+# arbitrary userspace stream wrapping. Set ``RELIQUARY_NO_STDERR=1``
+# to disable the direct-write fallback entirely.
+try:
+    _RAW_STDERR_FD: int | None = os.dup(2)
+except OSError:
+    _RAW_STDERR_FD = None
+
+# Pinned reliquary loggers that we keep handler-free (they propagate
+# to root). Defended below by ``_resanity_pinned_handlers``.
+_PINNED_RELIQUARY_LOGGERS = (
+    "reliquary",
+    "reliquary.miner.engine",
+    "reliquary.miner.submitter",
+    "reliquary.infrastructure.chain",
+    "reliquary.infrastructure.drand",
+    "reliquary.cli",
+    "vllm_adapter",
+    "bittensor",
+    "bittensor.core",
+    "btlogging",
+)
+# How often (in _emit calls) to re-strip handlers off named loggers.
+# bittensor/vllm have shown a pattern of re-attaching handlers AFTER
+# the one-time reseat fires (e.g. on each metagraph fetch, each
+# checkpoint reload, each EngineCoreProc respawn), producing the
+# "logs duplicate intermittently" symptom. _emit is hit ~5-10 times
+# per generation (PICK + GEN + OOZ/SUB ± SUMMARY), so 10 means we
+# self-heal within 1-2 generations of any new pollution.
+_HANDLER_SANITY_EVERY = 10
+_handler_sanity_counter = 0
+
+# Deduplication ring: drop (logger_name, msg) tuples emitted within
+# ``_DEDUPE_WINDOW_S`` of an identical prior emission. This is a
+# defensive backstop in case BOTH the handler-strip AND the raw-fd
+# write paths fail to prevent duplication (e.g. an upstream lib taps
+# stderr at the C level via dup2 BEFORE we capture our own dup).
+_DEDUPE_WINDOW_S = 0.5
+_dedupe_last: dict[tuple[str, str], float] = {}
+
+
+def _resanity_pinned_handlers() -> int:
+    """Strip any newly-attached handlers off pinned named loggers.
+
+    Also re-asserts ``propagate=True`` and ``disabled=False`` because
+    some libs flip those when they install themselves.
+
+    Cheap: most loggers have zero handlers most of the time, so this
+    iterates a tuple of ~10 strings and does ``lg.handlers``-length
+    check per call. Total cost ~5 µs per call on a typical box.
+
+    Returns the number of handlers stripped this pass (0 in steady
+    state).
+    """
+    stripped = 0
+    for name in _PINNED_RELIQUARY_LOGGERS:
+        lg = logging.getLogger(name)
+        if lg.handlers:
+            for h in list(lg.handlers):
+                lg.removeHandler(h)
+                stripped += 1
+        if not lg.propagate:
+            lg.propagate = True
+        if lg.disabled:
+            lg.disabled = False
+    return stripped
+
+
+def _raw_stderr_write(line: str) -> None:
+    """Write a line directly to the kernel-level stderr fd, bypassing
+    every Python-side stream wrap (sys.stderr, sys.__stderr__, any tee
+    installed by btlogging, etc.).
+
+    Falls back to ``sys.__stderr__`` if the fd dup at import time
+    failed (e.g. running in an embedded interpreter with no stderr).
+    Always appends a newline if missing.
+    """
+    if not line.endswith("\n"):
+        line = line + "\n"
+    try:
+        data = line.encode("utf-8", "replace")
+        if _RAW_STDERR_FD is not None:
+            os.write(_RAW_STDERR_FD, data)
+        else:
+            stream = getattr(sys, "__stderr__", None) or sys.stderr
+            stream.write(line)
+            stream.flush()
+    except Exception:
+        pass
+
 
 def _emit(level: int, fmt: str, *args) -> None:
-    """Emit a structured line via logger AND raw stderr.
+    """Emit a structured line via logger AND a bulletproof raw-fd write.
 
     Use for operator-critical events whose visibility must survive a
     handler clobber: per-attempt PICK/GEN/SUB/OOZ/SKIP/ERR, window
     banners, periodic SUMMARY. Routine debug/trace logs continue using
     plain ``logger.info`` / ``logger.debug``.
+
+    Three layers of defense against the duplicate-log pathology:
+
+    1. **Periodic handler strip**: every ``_HANDLER_SANITY_EVERY``
+       calls, scan pinned loggers and strip any handlers that got
+       re-attached by third-party libs (bittensor/vllm) after the
+       one-time reseat.
+    2. **Raw-fd direct write**: bypass Python-level stream wrapping
+       entirely — write via ``os.write(captured_fd, ...)`` where the
+       fd was duped at module import time, before any third-party
+       wrap could install itself.
+    3. **Dedupe filter**: drop a (logger, msg) pair that's identical
+       to one emitted in the last 500 ms. Catches the rare race where
+       layers 1+2 both fail.
     """
     if args:
         try:
@@ -307,18 +429,44 @@ def _emit(level: int, fmt: str, *args) -> None:
             msg = f"{fmt} args={args!r}"
     else:
         msg = fmt
+
+    # Layer 1: periodic handler sanity check.
+    global _handler_sanity_counter
+    _handler_sanity_counter += 1
+    if _handler_sanity_counter % _HANDLER_SANITY_EVERY == 0:
+        n = _resanity_pinned_handlers()
+        if n:
+            # Use _raw_stderr_write directly here — don't recurse
+            # through _emit. Use the logger too so file handlers see
+            # it.
+            note = (
+                f"[engine.v4] handler sanity check: re-stripped {n} "
+                f"unauthorized handlers from pinned loggers"
+            )
+            logger.info(note)
+            _raw_stderr_write(f"[engine] {note}")
+
+    # Layer 3: dedupe by (logger_name, msg) within 500ms.
+    now = time.monotonic()
+    dedupe_key = (logger.name, msg)
+    last_t = _dedupe_last.get(dedupe_key)
+    if last_t is not None and (now - last_t) < _DEDUPE_WINDOW_S:
+        # Identical message emitted very recently — skip silently. This
+        # is the backstop for the duplicate-log pathology. In normal
+        # operation no two operational messages are identical within
+        # 500 ms, so this is safe.
+        _dedupe_last[dedupe_key] = now
+        return
+    _dedupe_last[dedupe_key] = now
+    # Periodically GC the dedupe map so it doesn't grow unbounded.
+    if len(_dedupe_last) > 256:
+        cutoff = now - 60.0
+        for k in [k for k, t in _dedupe_last.items() if t < cutoff]:
+            del _dedupe_last[k]
+
     logger.log(level, msg)
     if _STDERR_FALLBACK_ENABLED:
-        try:
-            # Use ``sys.__stderr__`` — the ORIGINAL, never-wrapped file
-            # object — to bypass any tee installed by bittensor's
-            # ``btlogging`` (which mirrors sys.stderr writes back into
-            # the logging framework). Without this, every PICK/SUB
-            # line would print twice once bittensor has been imported.
-            stream = getattr(sys, "__stderr__", None) or sys.stderr
-            print(f"[engine] {msg}", file=stream, flush=True)
-        except Exception:
-            pass
+        _raw_stderr_write(f"[engine] {msg}")
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +541,13 @@ class _MinerMetrics:
     batched_proof_consecutive_fails: int = 0
     k_histogram: list[int] = field(default_factory=lambda: [0] * (M_ROLLOUTS + 1))
     reasons: dict[str, int] = field(default_factory=dict)
+    # Rolling HTTP latency window (last N submit_batch_v2 calls).
+    # Used to surface "validator is slow" in the SUMMARY line so the
+    # operator immediately knows when their window_mismatch /
+    # window_not_active rejection storm is caused by validator
+    # latency rather than by their own miner code.
+    http_ms_recent: list[float] = field(default_factory=list)
+    _http_ms_window: int = 20
 
     def record_generation(self, k_solved: int) -> None:
         self.generated += 1
@@ -412,6 +567,20 @@ class _MinerMetrics:
                 self.batched_proof_consecutive_fails += 1
         if reason is not None:
             self.reasons[reason] = self.reasons.get(reason, 0) + 1
+
+    def record_http_latency(self, http_ms: float) -> None:
+        """Append a successful submit_batch_v2 round-trip time."""
+        self.http_ms_recent.append(http_ms)
+        if len(self.http_ms_recent) > self._http_ms_window:
+            self.http_ms_recent.pop(0)
+
+    def recent_http_avg_s(self) -> float:
+        """Average of the last ``_http_ms_window`` HTTP times, in seconds.
+        Returns 0.0 if no samples yet.
+        """
+        if not self.http_ms_recent:
+            return 0.0
+        return (sum(self.http_ms_recent) / len(self.http_ms_recent)) / 1000.0
 
     def record_local_oos(self) -> None:
         self.local_out_of_zone += 1
@@ -447,12 +616,16 @@ class _MinerMetrics:
             else f" proof=per-rollout(fallback)"
         )
         k_str = "/".join(str(c) for c in self.k_histogram)
+        http_avg = self.recent_http_avg_s()
+        http_str = (
+            f" http_avg={http_avg:.1f}s" if http_avg > 0 else ""
+        )
         return (
             f"generated={self.generated} in_zone={self.in_zone_rate:.1f}% "
             f"submitted={self.submitted} accepted={self.accepted} "
             f"({rate:.1f}%) rejected={self.rejected} "
             f"local_oos={self.local_out_of_zone} net_err={self.network_errors}"
-            f"{warm_str}{proof_str} k_hist=[{k_str}] top=[{top_str}]"
+            f"{warm_str}{proof_str}{http_str} k_hist=[{k_str}] top=[{top_str}]"
         )
 
 
@@ -1127,6 +1300,12 @@ class MiningEngine:
         # have completed. See ``_one_time_logger_reseat``.
         self._logger_reseated: bool = False
 
+        # Wall-clock at which we first observed the current window in
+        # OPEN state. Used to surface ``open_age=N.Ns`` in PICK and SUB
+        # logs so the operator can see whether submissions are racing
+        # the ~60s OPEN-phase window edge.
+        self._window_open_seen_at: float | None = None
+
     def _resolve_eos_ids(self) -> set[int]:
         """Collect every token ID the model treats as a stop token.
 
@@ -1312,16 +1491,20 @@ class MiningEngine:
         # Generous HTTP timeouts. Reasoning per leg:
         #   - connect=10s: long enough to absorb transient DNS / TCP
         #     handshake hiccups but quickly surfaces a dead validator.
-        #   - read=90s: validator's GRAIL verification can take 30-60 s
+        #   - read=120s: validator's GRAIL verification can take 30-90 s
         #     under heavy load (batched_proof_active=True ships 8
-        #     rollouts × up to 8192 tokens). The default 30s timeout
-        #     was producing window_mismatch rejections on perfectly
-        #     good submissions when the validator was slow.
-        #   - write=30s: upload of the ~MB-size proof payload.
+        #     rollouts × up to 8192 tokens). We've observed real
+        #     submissions taking 100+ s and getting ACCEPTED, so this
+        #     gives validator full slack before the upstream submitter
+        #     retries (and the retry, by definition, hits a fresh
+        #     window and gets window_not_active).
+        #   - write=60s: upload of the proof payload. The user has
+        #     observed WriteTimeout retries at the default 30s when
+        #     the validator's network is congested.
         #   - pool=10s: connection-pool wait.
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(
-                connect=10.0, read=90.0, write=30.0, pool=10.0,
+                connect=10.0, read=120.0, write=60.0, pool=10.0,
             ),
         ) as client:
             while True:
@@ -1374,6 +1557,15 @@ class MiningEngine:
                             len(state.cooldown_prompts), state.checkpoint_n,
                         )
                     last_window_n = state.window_n
+                    # Track the wall-clock at which we first saw this
+                    # window in OPEN state, so we can surface
+                    # ``open_age=N.Ns`` to make pipeline-vs-window-edge
+                    # races diagnosable. The protocol gives us
+                    # ``_OPEN_PHASE_BUDGET_S`` (≈60s) of OPEN per
+                    # window, so an ``open_age`` close to that budget
+                    # means we're starting too late to reasonably
+                    # complete a gen+proof+http submission.
+                    self._window_open_seen_at = time.monotonic()
                     self._superseded_in_window = set()
                     # Update arrival-rate EMA from the new cooldown delta.
                     self._prompt_stats.record_cooldown_diff(
@@ -1422,14 +1614,21 @@ class MiningEngine:
                 p_hat = a / (a + b)
                 attempts = self._prompt_stats.attempts(prompt_idx)
                 arr = self._prompt_stats.arrival_rate(prompt_idx)
+                open_age_s = (
+                    time.monotonic() - self._window_open_seen_at
+                    if getattr(self, "_window_open_seen_at", None) is not None
+                    else 0.0
+                )
                 _emit(
                     logging.INFO,
                     "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
-                    "attempts=%d arr=%.2f zone_p=%.2f slots=%d/8",
+                    "attempts=%d arr=%.2f zone_p=%.2f slots=%d/8 "
+                    "open_age=%.1f/%ds",
                     state.window_n, prompt_idx,
                     _short_level(level), _short_subject(subject),
                     p_hat, attempts, arr, _zone_probability(p_hat),
                     state.valid_submissions,
+                    open_age_s, _OPEN_PHASE_BUDGET_S,
                 )
                 logger.debug(
                     "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
@@ -1489,6 +1688,38 @@ class MiningEngine:
                         "[W=%d] OOZ  prompt=%-4d sigma=%.3f<%.2f k=%d/%d -> skip submit",
                         state.window_n, prompt_idx, sigma, SIGMA_MIN,
                         k_solved, M_ROLLOUTS,
+                    )
+                    # Surface SUMMARY periodically even when skipping submit.
+                    if self._metrics.generated % _SUMMARY_EVERY == 0:
+                        _emit(
+                            logging.INFO,
+                            "=== SUMMARY === %s",
+                            self._metrics.summary(self._prompt_stats),
+                        )
+                    continue
+
+                # CHALLENGE_K gate. The validator's ``verify_logprobs_claim``
+                # requires every non-truncated rollout to have
+                # ``completion_length >= CHALLENGE_K=32``; anything shorter
+                # silently fails with ``LOGPROB_MISMATCH`` deep in the
+                # async worker (the miner never sees that verdict — the
+                # /submit response is the provisional SUBMITTED sentinel).
+                # Skip the submit when ANY rollout in the group is too
+                # short, so we don't waste an HTTP round-trip + window
+                # slot on a doomed submission.
+                #
+                # A rollout that ends with EOS at length < 32 is the
+                # ONLY case this catches: those pass termination Path 2
+                # and reach the logprob check. ``finish=length`` rollouts
+                # are at completion_length = effective_max_new (always
+                # >> 32), so they're never the short one.
+                min_clen = min(completion_lens)
+                if min_clen < CHALLENGE_K:
+                    _emit(
+                        logging.INFO,
+                        "[W=%d] SHRT prompt=%-4d min_clen=%d<%d -> skip submit "
+                        "(would fail validator LOGPROB_MISMATCH)",
+                        state.window_n, prompt_idx, min_clen, CHALLENGE_K,
                     )
                     if self._metrics.generated % _SUMMARY_EVERY == 0:
                         _emit(
@@ -1558,7 +1789,21 @@ class MiningEngine:
                 gpu_pre = _gpu_mem_compact(self.vllm_gpu)
                 t_http = time.monotonic()
                 try:
-                    resp = await submit_batch_v2(url, request, client=client)
+                    # Explicit ``timeout=120.0`` overrides the upstream
+                    # submitter's default of 60s. The submitter applies
+                    # whatever value we pass to EACH attempt via
+                    # ``cli.post(..., timeout=timeout)``, which trumps
+                    # the client-level ``httpx.Timeout`` we configured
+                    # at AsyncClient construction. 120s gives the
+                    # validator's GRAIL worker enough slack to verify
+                    # under load BEFORE the upstream's 3-retry loop
+                    # fires; without this, our first attempt times
+                    # out at 60s, the retry hits a fresh window, and
+                    # we get a guaranteed ``window_not_active`` on a
+                    # submission that would have been accepted.
+                    resp = await submit_batch_v2(
+                        url, request, client=client, timeout=120.0,
+                    )
                     http_ms = (time.monotonic() - t_http) * 1000.0
                     gpu_post = _gpu_mem_compact(self.vllm_gpu)
                     reason_str = (
@@ -1566,26 +1811,47 @@ class MiningEngine:
                         else str(resp.reason)
                     )
                     self._metrics.record(resp.accepted, reason_str)
+                    self._metrics.record_http_latency(http_ms)
                     if reason_str == "superseded":
                         self._superseded_in_window.add(prompt_idx)
                         self._prompt_stats.record_superseded(prompt_idx)
                     self._maybe_check_proof_fallback()
-                    status = "ACCEPTED" if resp.accepted else "REJECTED"
+                    # ``reason=submitted`` is the validator's PROVISIONAL
+                    # sentinel: the request was queued on the async
+                    # worker but GRAIL has NOT yet run. The final
+                    # verdict (accept / silent reject for GRAIL_FAIL /
+                    # LOGPROB_MISMATCH / DISTRIBUTION_SUSPICIOUS) only
+                    # surfaces in the validator's logs and R2 archive;
+                    # the miner never sees a follow-up HTTP response.
+                    # Label it QUEUED in the SUB line so the operator
+                    # doesn't misread it as a confirmed accept.
+                    if resp.accepted:
+                        if reason_str == "submitted":
+                            status = "QUEUED"
+                        else:
+                            status = "ACCEPTED"
+                    else:
+                        status = "REJECTED"
                     proof_mode = (
                         "batched" if self._metrics.batched_proof_active
                         else "per-rollout"
                     )
                     sub_level = logging.INFO if resp.accepted else logging.WARNING
+                    open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if getattr(self, "_window_open_seen_at", None) is not None
+                        else 0.0
+                    )
                     _emit(
                         sub_level,
                         "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
                         "sigma=%.3f merkle=%s proof=%s gen=%.1fs proof=%.1fs "
-                        "http=%.2fs gpu=%s->%s -> %s reason=%s",
+                        "http=%.2fs gpu=%s->%s open_age=%.1fs -> %s reason=%s",
                         state.window_n, prompt_idx,
                         _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
                         merkle_root[:8], proof_mode,
                         gen_ms / 1000.0, proof_ms / 1000.0, http_ms / 1000.0,
-                        gpu_pre, gpu_post,
+                        gpu_pre, gpu_post, open_age_s,
                         status, reason_str,
                     )
                     results.append(resp)
