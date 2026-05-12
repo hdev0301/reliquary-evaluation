@@ -97,6 +97,128 @@ prompt slot we can claim. These changes attack each phase:
     Lets accept/reject + SUMMARY logs surface within tens of ms of
     the network completing, not at the start of the NEXT iteration.
 
+Window-rollover-miss fix (v4.2 post-mortem)
+===========================================
+
+Observation from a real W=954 trace: the engine picked an L5/Precalculus
+prompt at open_age=43 s, took 41 s to generate, 2.6 s to proof, then
+SKIPPED with "window no longer accepting" after a 66 s gap that didn't
+show up in proof_ms. Root cause was three layered bugs:
+
+a. ``_OPEN_PHASE_BUDGET_S = 240`` was a hard-coded over-estimate.
+   The validator actually rolled OPEN → TRAINING at ~153 s, so the
+   picker's deadline math thought it had 200 s of slack when it
+   actually had ~110 s.
+
+b. The pre- and post-proof ``/state`` probes used the AsyncClient's
+   default 30 s timeout. When the validator hit a brief congestion
+   spike at the window-roll boundary, each probe burned its full
+   timeout (× 2 with the one-retry policy = up to 60 s combined).
+
+c. The pre-proof state-probe exception path was logged at DEBUG,
+   so the operator could not see that ``/state`` had wedged.
+
+Fixes:
+
+12. **Adaptive observed-OPEN budget.** ``_record_observed_open_duration``
+    runs at every window-roll boundary; ``_effective_open_budget_s``
+    returns ``min(_OPEN_PHASE_BUDGET_S, observed_min × 0.9)``
+    floored at 90 s, so after ≥ 3 windows the picker uses what
+    the validator actually delivers — not the optimistic ceiling.
+
+13. **Tight ``/state`` per-request timeout.** ``_STATE_PROBE_TIMEOUT_S
+    = 5 s`` is passed explicitly to every pre-proof, post-proof, and
+    main-loop /state poll. Two attempts via the submitter's retry
+    policy cap any single probe at ~10.5 s wall-clock even when the
+    validator is at its slowest. (The /submit upload still uses the
+    larger ``http_timeout_s`` default — that one moves real bytes.)
+
+14. **Visible state-probe failures.** Pre-proof + post-proof
+    ``SubmissionError`` is now INFO-level
+    (``[W=…] STATE-PROBE pre/post-proof failed …``). The post-proof
+    failure path also falls THROUGH to firing the submit rather than
+    skipping — if /state is wedged we don't know the window state,
+    so we submit and let the validator decide.
+
+15. **Tighter slack thresholds in the picker.** Deadline penalties
+    now require positive headroom: < 5 s slack → hard penalty,
+    < 20 s slack → soft penalty (was: < -5 s / < 0 s, i.e. only
+    prompts EXPECTED to bust the deadline got demoted). With an
+    accurate ``_effective_open_budget_s``, this finally bites and
+    long-completion prompts get correctly down-ranked when the
+    window is already half-spent.
+
+Saturated-cohort burn fix (W=957 post-mortem)
+=============================================
+
+A second log trace showed the picker drawing four high-phat (0.85-0.92)
+prompts from saturated cohorts in a single window, all producing
+k=8/8 → OOZ → no submit. The fundamental cause is the model being
+strong enough that most MATH cohorts saturate at k=8, but the
+picker had no mechanism to learn this in-window.
+
+16. **Per-window OOZ-cohort blacklist.** Every OOZ skip records the
+    ``(level, subject)`` of the wasted attempt into
+    ``self._ooz_cohorts_in_window``. The picker multiplies any
+    candidate from a blacklisted cohort by ``_OOZ_COHORT_PENALTY``
+    (0.20 ≈ 5× preference for fresh cohorts). The set resets at
+    every window-roll boundary. The OOZ log now prints
+    ``cohort=(...) -> ... (cohort blacklisted for window)`` and the
+    PICK log prints ``ooz_blk=N`` for visibility.
+
+17. **Second-chance expanded candidate pool.** When the initial K=64
+    draw yields a best score < ``_SECOND_CHANCE_SCORE_THRESHOLD = 0.15``
+    (which is what happens when most cohorts in the random sample
+    are saturated), the picker expands to K=256 candidates for a
+    bigger lottery. Costs ~hundreds of µs of extra CPU; gains a
+    real chance of hitting a non-saturated cohort. Race mode skips
+    this — there, speed beats optimality.
+
+Picker-sharpening fixes (W=954-W=964 post-mortem)
+=================================================
+
+A third trace (10 windows, 22 picks, 1 successful submit) showed the
+picker drawing repeatedly from saturated cohorts even AFTER the OOZ
+blacklist was active. Root cause: the discrimination signals were
+too weak for the picker to skip the saturated cohorts in the first
+half of a session.
+
+18. **Faster cohort learning.** ``cohort_inzone_rate`` ``min_groups``
+    drops from 5 → 2. With only 2 observations the Laplace smoothing
+    still controls the variance, but the picker stops being
+    completely blind to cohort quality in the first 2 windows.
+
+19. **Squared ciz_rate penalty.** The picker multiplies ``score *=
+    ciz_rate ** 2`` instead of ``ciz_rate``. A balanced cohort
+    (ciz=0.7) scores 49 % under squared vs 70 % under linear; a
+    saturated cohort (ciz=0.2) scores 4 % vs 20 %. The discrimination
+    factor jumps from 3.5x → 12x so the picker reliably down-ranks
+    saturated cohorts once any signal exists.
+
+20. **Wider candidate pool.** ``_CANDIDATES_DEFAULT`` 32 → 64;
+    ``_CANDIDATES_SECOND_CHANCE`` 128 → 256;
+    ``_SECOND_CHANCE_SCORE_THRESHOLD`` 0.05 → 0.15. Triggering
+    expansion at score < 0.15 (rather than < 0.05) means most picks
+    now consider 256 candidates instead of 64, virtually guaranteeing
+    the picker sees the best non-saturated cohort if one exists in
+    the env. Combined CPU cost remains under 1 ms per pick.
+
+21. **Tighter observed-OPEN floor.** ``_OBSERVED_OPEN_MIN_FLOOR_S``
+    90 → 75 and ``_OBSERVED_OPEN_SAFETY_FACTOR`` 0.90 → 0.85. The
+    W=954-964 trace had real OPEN windows as short as 86 s (W=955,
+    W=960) — a 90 s floor over-estimated them. The lower numbers
+    let the adaptive budget hug the actual edge so the picker's
+    deadline math doesn't accept long-completion prompts that
+    will overshoot.
+
+22. **Continuous length-aware boost.** Picker score gets a smooth
+    ``× (1 + 0.10 × (1 - avg_len/4096))`` multiplier clamped to
+    [0.85, 1.15]. The existing deadline penalty is binary (kicks
+    in only below the slack threshold); the smooth boost adds a
+    gentle gradient so the picker prefers short prompts even when
+    slack is comfortable. Over many picks this shifts the
+    expected GEN time downward, leaving more headroom for HTTP.
+
 ``launcher-v3.py`` and ``main-v3.py`` continue to work unchanged — the
 MiningEngine constructor signature is identical to v3, including the
 ``stats_path`` kwarg. The vLLM adapter detection sentinel
@@ -186,6 +308,7 @@ Engine invariants (preserved from v3)
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import math
 import os
@@ -229,6 +352,34 @@ _OPEN_PHASE_BUDGET_S: int = 240
 # the operator can see the "ceiling" the chain enforces independently
 # of whatever the batcher's actual fill rate is.
 _OPEN_PHASE_MIN_S: int = WINDOW_LENGTH * BLOCK_TIME_SECONDS  # = 60
+
+# Observed-OPEN-duration tracker (v4.2 post-mortem fix).
+# ``_OPEN_PHASE_BUDGET_S = 240`` is the optimistic upper bound; real
+# validators frequently roll OPEN → TRAINING much earlier (e.g. 150 s
+# in production logs). When the picker thinks it has 200 s of slack
+# but actually has 110 s, it confidently picks long-completion
+# prompts that miss the window every time. The fix: at every window
+# roll, record ``now - _window_open_seen_at`` of the previous window
+# into a rolling deque. The effective budget used by the picker is
+# then ``min(_OPEN_PHASE_BUDGET_S, observed_min × _SAFETY_FACTOR)`` —
+# realistic on the way down (we learn the validator's true OPEN
+# duration), generous on the way up (we never trust beyond the
+# configured ceiling).
+_OBSERVED_OPEN_HISTORY: int = 20  # window count for the rolling min
+_OBSERVED_OPEN_SAFETY_FACTOR: float = 0.85  # 15 % margin under the worst observed
+_OBSERVED_OPEN_MIN_FLOOR_S: float = 75.0  # never go below this — would starve picker
+
+# Tight per-request timeout for /state polls (v4.2 fix). The /state
+# response body is < 1 KB and the validator's handler is a synchronous
+# attribute read on its scheduler — there's no legitimate reason for a
+# /state GET to take more than a couple of seconds. The httpx client's
+# baseline ``read=15 s`` is generous so /submit body uploads can finish,
+# but a 15-s-on-/state means one wedged poll during a window rollover
+# burns half the OPEN window. 5 s here + one quick retry caps any
+# single /state probe at ~10.5 s wall-clock even when the validator
+# is at its slowest. The pre-/post-proof state checks pass this
+# explicitly to override the client default.
+_STATE_PROBE_TIMEOUT_S: float = 5.0
 from reliquary.infrastructure import chain
 from reliquary.protocol.submission import (
     BatchSubmissionRequest,
@@ -280,8 +431,32 @@ _COHORT_DECAY = 0.85
 _COHORT_MIN_OBS = 8
 _COHORT_ESS_CAP = 20.0
 
-# Best-of-K candidates in the Thompson picker. Default 32 mirrors v3.
-_CANDIDATES_DEFAULT = 32
+# Best-of-K candidates in the Thompson picker. Default 64 (was 32);
+# bumped after W=954-W=964 log analysis showed the random draw was
+# missing the rare-but-balanced cohort (L5/Precalculus) most windows.
+# At K=64 vs an env with 35 cohorts, the chance of hitting any given
+# cohort at least once is ≈ 1 - (34/35)^64 ≈ 84% — vs 60% at K=32.
+_CANDIDATES_DEFAULT = 64
+
+# Second-chance candidate pool size (v4.2). When the initial K=64 draw
+# returns nothing better than ``_SECOND_CHANCE_SCORE_THRESHOLD``,
+# expand the candidate pool to this size. Helps in the strong-model
+# regime where most MATH cohorts saturate at k=8 and a random K=64
+# draw is mostly saturated — a wider draw gives the picker more
+# chances to hit a balanced cohort. Bumped from 128 → 256 (W=954-964
+# log analysis): with 35 cohorts, K=256 hits any given cohort at
+# ≈ 99.9% rate, virtually guaranteeing the picker sees the best
+# non-saturated cohort if one exists. Still completes in single-digit
+# ms — each evaluation is ~3 µs of cached cohort lookup + arithmetic.
+_CANDIDATES_SECOND_CHANCE = 256
+# A score below this is "weak". Raised from 0.05 → 0.15 after the
+# W=954-964 log analysis: scores of 0.04-0.10 are still "the best in
+# a saturated random sample, but not actually good" — they correspond
+# to a marginal pick that will most likely produce k=0/8 or k=8/8.
+# At 0.15 we trigger expansion whenever the initial K=64 didn't
+# surface a clearly-balanced cohort × prompt combination. The extra
+# CPU cost of one in three picks expanding is well under 1 ms.
+_SECOND_CHANCE_SCORE_THRESHOLD: float = 0.15
 
 # Race mode: when the window is filling up, halve K and bias toward
 # faster prompts (lower historical completion length). Reduces
@@ -372,8 +547,33 @@ _SHORT_COMPLETION_PENALTY: float = 0.10
 _TOKENS_PER_SEC_EST: float = 200.0
 _DEADLINE_PROOF_DEFAULT_S: float = 3.0
 _DEADLINE_HTTP_DEFAULT_S: float = 5.0
-_DEADLINE_HARD_PENALTY: float = 0.10  # > 5 s past deadline → score *= 0.10
-_DEADLINE_SOFT_PENALTY: float = 0.50  # 0-5 s past deadline → score *= 0.50
+_DEADLINE_HARD_PENALTY: float = 0.10  # very risky → score *= 0.10
+_DEADLINE_SOFT_PENALTY: float = 0.50  # risky → score *= 0.50
+
+# Slack thresholds (v4.2). ``slack_s = budget - expected_finish_s``;
+# hard penalty when slack drops below 5 s (no buffer left for jitter
+# or a longer-than-avg gen), soft penalty when below 20 s (risky but
+# tolerable). Tightened from the previous "< -5 / < 0" because the
+# old thresholds only flagged prompts EXPECTED to bust the budget,
+# leaving zero headroom for the inevitable variance in gen time and
+# /state-probe latency around window rollover — see the post-mortem
+# of W=954 in the project history.
+_DEADLINE_HARD_SLACK_S: float = 5.0
+_DEADLINE_SOFT_SLACK_S: float = 20.0
+
+# Per-window OOZ-cohort penalty (v4.2 picker realism).
+# If a cohort (level, subject) already produced an OOZ skip during
+# the current window, every subsequent prompt from that cohort gets
+# its score multiplied by ``_OOZ_COHORT_PENALTY``. This addresses
+# the W=957 pattern where the picker keeps drawing from the SAME
+# saturated cohorts (L3/Prealgebra, L4/Prealgebra, L4/Counting...)
+# burning multiple GEN cycles on guaranteed-k=8 prompts before the
+# window closes. The penalty is multiplicative (not zero) so that
+# in a window where ALL cohorts are saturated we still pick
+# something rather than starving the loop. 0.20 ≈ 5× preference
+# for a fresh cohort over a known-saturated one at equal raw
+# scores.
+_OOZ_COHORT_PENALTY: float = 0.20
 # Reference completion length used to scale ``http_avg_s`` per-prompt.
 # A candidate with avg_len = _TYPICAL_AVG_LEN_FOR_UPLOAD gets the
 # unscaled http_avg estimate; longer prompts pay proportionally more.
@@ -1288,7 +1488,7 @@ class _PromptStats:
         self,
         level: str,
         subject: str,
-        min_groups: int = 5,
+        min_groups: int = 2,
     ) -> float | None:
         """Empirical in-zone rate for the (level, subject) cohort.
 
@@ -1298,6 +1498,13 @@ class _PromptStats:
         trust). The picker multiplies ``zone_p`` by this value to
         discount cohorts that consistently produce saturated k=0/8 even
         when the per-prompt phat looks marginal.
+
+        ``min_groups`` dropped from 5 → 2 (W=954-964 log analysis): the
+        Laplace smoothing already absorbs small-sample noise, and the
+        early picks of a session would otherwise see ciz_rate=None on
+        most cohorts (in the trace, only ~28 groups had been recorded
+        across 35 cohorts ≈ 0.8 obs/cohort, so the picker had zero
+        cohort-level discrimination until the third or fourth window).
         """
         key = self._cohort_key(level, subject)
         iz, tot = self._cohort_inzone.get(key, (0, 0))
@@ -1454,6 +1661,11 @@ def pick_prompt_idx(
     # ``_SHORT_COMPLETION_PENALTY`` multiplier applied to their score.
     # CHALLENGE_K=32 is the validator's logprob-claim minimum.
     short_completion_threshold: int = CHALLENGE_K,
+    # Cohorts already proven OOZ-saturated in the current window;
+    # prompts from these cohorts get _OOZ_COHORT_PENALTY applied
+    # to their score so a single bad window doesn't keep generating
+    # k=8 rollouts from the same cohort.
+    ooz_cohorts_in_window: set[tuple[str, str]] | None = None,
 ) -> int:
     """Best-of-K Thompson-sampled prompt selection.
 
@@ -1524,12 +1736,13 @@ def pick_prompt_idx(
     best_score: float = -1.0
     best_len: float = float("inf")
 
-    for _ in range(K):
-        idx = _draw_one()
-        if idx is None:
-            break
+    def _score_one(idx: int) -> tuple[float, float] | None:
+        """Evaluate one candidate; returns ``(score, avg_len)`` or None
+        if the candidate is unevaluable (e.g. already seen). Updates
+        ``seen`` as a side effect.
+        """
         if idx in seen:
-            continue
+            return None
         seen.add(idx)
 
         cohort = stats.cached_cohort(idx)
@@ -1549,70 +1762,113 @@ def pick_prompt_idx(
         arrival_z = stats.arrival_rate(idx)
         score = zone_p * (1.0 - _CONGESTION_WEIGHT * arrival_z)
 
-        # Cohort empirical in-zone rate multiplier. When a cohort has
-        # produced ≥ 5 group attempts and its empirical in-zone rate is
-        # below 1.0 (e.g., L2,Geometry routinely yields k=8), multiply
-        # score by the Laplace-smoothed rate. This correctly discounts
-        # cohorts whose per-rollout phat yields zone_p=0.90 in theory but
-        # whose observed in-zone rate is only 10-20% because the model
-        # is actually p≈0.95 on those problems (landing k=7/8 or k=8/8).
+        # Cohort empirical in-zone rate multiplier. Squared so the
+        # picker discriminates ~12-25x between a balanced cohort (ciz
+        # ≈ 0.7) and a saturated one (ciz ≈ 0.2) instead of only 3.5x
+        # under the linear version. The W=954-964 trace showed the
+        # linear penalty was insufficient: saturated cohorts (L4/Algebra,
+        # L3/Counting, L4/Geometry) routinely outscored balanced cohorts
+        # (L5/Precalculus) because their phat × zone_p baseline was
+        # high enough that even a 3.5x ciz penalty left them competitive.
+        # Squaring brings the saturated cohorts' effective score down by
+        # the same factor again so the picker reliably prefers a
+        # known-balanced cohort once 2+ observations exist.
         ciz_rate = stats.cohort_inzone_rate(level, subject)
         if ciz_rate is not None:
-            score *= ciz_rate
+            score *= ciz_rate * ciz_rate
 
-        # Short-completion penalty. Prompts that have ever produced
-        # a rollout shorter than CHALLENGE_K=32 are high-risk for
-        # LOGPROB_MISMATCH (silent reject in the validator's async
-        # worker); down-rank but don't permanently ban — a single
-        # short gen could be a model fluke.
+        # Per-window OOZ-cohort penalty.
+        if (
+            ooz_cohorts_in_window is not None
+            and (level, subject) in ooz_cohorts_in_window
+        ):
+            score *= _OOZ_COHORT_PENALTY
+
+        # Short-completion penalty.
         if stats.has_short_completion(idx, short_completion_threshold):
             score *= _SHORT_COMPLETION_PENALTY
 
-        # Time-budget penalty. Estimate expected pipeline completion
-        # for this candidate (open_age + gen_s + proof_s + http_s).
-        # The ~60 s OPEN-phase budget is finite; if our pipeline
-        # crosses it, the submission lands in TRAINING/PUBLISHING
-        # and gets WINDOW_NOT_ACTIVE rejected.
-        #
-        # v4.2 length-aware upload estimate: the HTTP payload scales
-        # roughly linearly with total token count (per-token GRAIL
-        # commitments + per-token logprobs). ``http_avg_s`` is the
-        # rolling average across recent submits — but a candidate with
-        # avg_len=8192 will upload ~2× longer than one with avg_len=2048
-        # at the same uplink speed. Scale http_avg_s by
-        # ``avg_len / _TYPICAL_AVG_LEN_FOR_UPLOAD`` (clamped) so the
-        # picker prefers shorter prompts when budget is tight.
-        if open_budget_s != float("inf"):
-            avg_len = stats.avg_completion_len(idx)
-            if avg_len is not None and _TOKENS_PER_SEC_EST > 0:
-                expected_gen_s = float(avg_len) / _TOKENS_PER_SEC_EST
-                # Clamp length factor to [0.5, 2.5] so a single long
-                # outlier prompt doesn't get exiled forever and a
-                # super-short prompt doesn't underestimate the fixed
-                # cost of TCP/TLS + header round-trip.
-                _length_factor = max(
-                    0.5,
-                    min(2.5, float(avg_len) / _TYPICAL_AVG_LEN_FOR_UPLOAD),
-                )
-                expected_http_s = http_avg_s * _length_factor
-                expected_finish_s = (
-                    open_age_s + expected_gen_s + proof_avg_s + expected_http_s
-                )
-                slack_s = open_budget_s - expected_finish_s
-                if slack_s < -5.0:
-                    score *= _DEADLINE_HARD_PENALTY
-                elif slack_s < 0.0:
-                    score *= _DEADLINE_SOFT_PENALTY
+        # Time-budget penalty with length-scaled http estimate.
+        avg_len_val = stats.avg_completion_len(idx)
+        if (
+            open_budget_s != float("inf")
+            and avg_len_val is not None
+            and _TOKENS_PER_SEC_EST > 0
+        ):
+            expected_gen_s = float(avg_len_val) / _TOKENS_PER_SEC_EST
+            _length_factor = max(
+                0.5,
+                min(2.5, float(avg_len_val) / _TYPICAL_AVG_LEN_FOR_UPLOAD),
+            )
+            expected_http_s = http_avg_s * _length_factor
+            expected_finish_s = (
+                open_age_s + expected_gen_s + proof_avg_s + expected_http_s
+            )
+            slack_s = open_budget_s - expected_finish_s
+            if slack_s < _DEADLINE_HARD_SLACK_S:
+                score *= _DEADLINE_HARD_PENALTY
+            elif slack_s < _DEADLINE_SOFT_SLACK_S:
+                score *= _DEADLINE_SOFT_PENALTY
 
+        # Continuous length-aware boost (v4.2 W=954-964 fix). The
+        # deadline penalty above is binary (kicks in only when slack
+        # drops below the threshold); when slack is moderate, the
+        # picker is indifferent between a 1 000-token prompt and a
+        # 7 000-token prompt that finish in nearly the same projected
+        # time. Apply a smooth multiplier so a clearly-short prompt
+        # gets a small bonus (≈ 1.10x at avg_len = 500) and a
+        # clearly-long one a small penalty (≈ 0.92x at avg_len =
+        # 8000). Effect is small per-pick (within ±10 %) but consistent
+        # — over many picks the picker drifts toward fast-completing
+        # prompts so the OPEN-window race is less prone to bad luck
+        # on a single long generation.
+        if avg_len_val is not None and avg_len_val > 0:
+            _len_ratio = float(avg_len_val) / _TYPICAL_AVG_LEN_FOR_UPLOAD
+            _len_boost = 1.0 + 0.10 * (1.0 - _len_ratio)
+            score *= max(0.85, min(1.15, _len_boost))
+
+        eff_len = float(avg_len_val) if avg_len_val is not None else float("inf")
+        return score, eff_len
+
+    def _update_best(idx: int, score: float, alen: float) -> None:
+        nonlocal best_idx, best_score, best_len
         if score > best_score:
             best_idx = idx
             best_score = score
-            best_len = stats.avg_completion_len(idx) or float("inf")
-        elif score == best_score:
-            alt_len = stats.avg_completion_len(idx) or float("inf")
-            if alt_len < best_len:
-                best_idx = idx
-                best_len = alt_len
+            best_len = alen
+        elif score == best_score and alen < best_len:
+            best_idx = idx
+            best_len = alen
+
+    def _scan(num: int) -> None:
+        """Draw and evaluate up to ``num`` more candidates."""
+        for _ in range(num):
+            idx = _draw_one()
+            if idx is None:
+                return
+            scored = _score_one(idx)
+            if scored is None:
+                continue
+            score, alen = scored
+            _update_best(idx, score, alen)
+
+    # Initial draw.
+    _scan(K)
+
+    # Second-chance expansion. When the best score after the initial
+    # K draws is weak (typical when the model is so strong that most
+    # cohorts saturate at k=8), do another, larger round of draws so
+    # the picker has a meaningfully better chance of finding a
+    # balanced-cohort prompt. Costs a few hundred microseconds of
+    # extra CPU work — negligible against the ~10-40 s GEN that
+    # follows. Skipped in race mode (slots_filled tall already, the
+    # priority is speed not optimality).
+    if (
+        best_score < _SECOND_CHANCE_SCORE_THRESHOLD
+        and slots_filled < _RACE_MODE_SLOTS_THRESHOLD
+        and K < _CANDIDATES_SECOND_CHANCE
+    ):
+        _scan(_CANDIDATES_SECOND_CHANCE - K)
 
     if best_idx is None:
         raise RuntimeError("no eligible prompt")
@@ -1795,6 +2051,34 @@ class MiningEngine:
         # logs so the operator can see whether submissions are racing
         # the ~60s OPEN-phase window edge.
         self._window_open_seen_at: float | None = None
+
+        # Rolling history of observed OPEN-phase durations per window
+        # (in seconds, computed at each window-roll boundary as
+        # ``now - _window_open_seen_at``). Used by
+        # ``_effective_open_budget_s`` to give the picker a realistic
+        # budget rather than the optimistic ``_OPEN_PHASE_BUDGET_S``
+        # constant.
+        #
+        # WHY: ``_OPEN_PHASE_BUDGET_S = 240`` is a generous upper bound
+        # on the protocol's OPEN duration. Real validators commonly
+        # roll OPEN→TRAINING much sooner (e.g. ~150 s in production
+        # logs), so the picker's deadline math thought it had ~200 s
+        # of headroom when it actually had ~110 s — picking a long-
+        # completion prompt that misses the window every time. The
+        # observed-min tracker below lets the engine learn the actual
+        # OPEN duration this validator delivers and clamp the budget
+        # to it (with a safety factor).
+        self._observed_open_durations_s: collections.deque[float] = (
+            collections.deque(maxlen=_OBSERVED_OPEN_HISTORY)
+        )
+
+        # Per-window OOZ-cohort blacklist (v4.2). Cohorts whose
+        # current-window pick already produced an OOZ skip; the
+        # picker uses this to apply ``_OOZ_COHORT_PENALTY`` to any
+        # future candidate from the same cohort during the window.
+        # Reset to ``set()`` at every window-roll boundary in the
+        # main poll loop.
+        self._ooz_cohorts_in_window: set[tuple[str, str]] = set()
 
     def _resolve_eos_ids(self) -> set[int]:
         """Collect every token ID the model treats as a stop token.
@@ -2272,7 +2556,15 @@ class MiningEngine:
 
             while True:
                 try:
-                    state = await get_window_state_v2(url, client=client)
+                    # Use the short state-probe timeout here too: a
+                    # stalled main-loop /state would block the engine
+                    # from ever entering OPEN-window logic, and the
+                    # default 30 s client timeout amplifies any
+                    # validator hiccup into a full poll-interval miss.
+                    state = await get_window_state_v2(
+                        url, client=client,
+                        timeout=_STATE_PROBE_TIMEOUT_S,
+                    )
                 except SubmissionError:
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
@@ -2345,11 +2637,30 @@ class MiningEngine:
 
                 # Window-edge bookkeeping.
                 if last_window_n != state.window_n:
+                    # Record the previous window's observed OPEN
+                    # duration BEFORE we reset _window_open_seen_at,
+                    # so the picker learns the validator's real
+                    # delivery rate window-by-window.
+                    if (
+                        last_window_n is not None
+                        and self._window_open_seen_at is not None
+                    ):
+                        _prev_open_s = (
+                            time.monotonic() - self._window_open_seen_at
+                        )
+                        self._record_observed_open_duration(_prev_open_s)
                     if last_window_n is not None:
                         _emit(
                             logging.INFO,
-                            "=== window %d -> %d === | %s",
+                            "=== window %d -> %d (observed_open=%.0fs, "
+                            "eff_budget=%.0fs) === | %s",
                             last_window_n, state.window_n,
+                            (
+                                time.monotonic() - self._window_open_seen_at
+                                if self._window_open_seen_at is not None
+                                else 0.0
+                            ),
+                            self._effective_open_budget_s(),
                             self._metrics.summary(self._prompt_stats),
                         )
                     else:
@@ -2365,12 +2676,16 @@ class MiningEngine:
                     # window in OPEN state, so we can surface
                     # ``open_age=N.Ns`` to make pipeline-vs-window-edge
                     # races diagnosable. The protocol gives us
-                    # ``_OPEN_PHASE_BUDGET_S`` (≈60s) of OPEN per
-                    # window, so an ``open_age`` close to that budget
-                    # means we're starting too late to reasonably
-                    # complete a gen+proof+http submission.
+                    # ``_OPEN_PHASE_BUDGET_S`` (configured upper-bound)
+                    # of OPEN per window, but the validator may roll
+                    # earlier — see ``_effective_open_budget_s()``.
                     self._window_open_seen_at = time.monotonic()
                     self._superseded_in_window = set()
+                    # Reset the per-window OOZ-cohort blacklist —
+                    # cohorts saturated in window N-1 may behave
+                    # differently in window N (different prompts get
+                    # sampled), so re-evaluate fresh each window.
+                    self._ooz_cohorts_in_window = set()
                     # Update arrival-rate EMA from the new cooldown delta.
                     self._prompt_stats.record_cooldown_diff(
                         set(state.cooldown_prompts)
@@ -2417,16 +2732,23 @@ class MiningEngine:
                 _min_pipeline_s = (
                     _hard_http_s + _hard_proof_s + _hard_min_gen_s
                 )
-                _hard_deadline_s = float(_OPEN_PHASE_BUDGET_S) - _min_pipeline_s
+                # Use the OBSERVED-OPEN-aware budget rather than the
+                # optimistic constant. After ≥ 3 windows of evidence
+                # this clamps the budget to what the validator
+                # actually delivered, so the gate skips PICKs that
+                # would otherwise burn 30-60 s of GPU on a doomed
+                # pipeline. See ``_effective_open_budget_s``.
+                _eff_budget_s = self._effective_open_budget_s()
+                _hard_deadline_s = _eff_budget_s - _min_pipeline_s
                 if _now_age_s > _hard_deadline_s:
                     _emit(
                         logging.INFO,
                         "[W=%d] WAIT open_age=%.1fs > hard_deadline=%.1fs "
-                        "(budget=%ds - http=%.1f - proof=%.1f - min_gen=%.1f) "
+                        "(eff_budget=%.0fs - http=%.1f - proof=%.1f - min_gen=%.1f) "
                         "— window already too old to land a submit; "
                         "idling 2s",
                         state.window_n, _now_age_s, _hard_deadline_s,
-                        _OPEN_PHASE_BUDGET_S, _hard_http_s,
+                        _eff_budget_s, _hard_http_s,
                         _hard_proof_s, _hard_min_gen_s,
                     )
                     await asyncio.sleep(2.0)
@@ -2455,9 +2777,10 @@ class MiningEngine:
                         slots_filled=state.valid_submissions,
                         superseded_in_window=self._superseded_in_window,
                         open_age_s=_open_age_s,
-                        open_budget_s=float(_OPEN_PHASE_BUDGET_S),
+                        open_budget_s=_eff_budget_s,
                         proof_avg_s=_proof_avg_s,
                         http_avg_s=_http_avg_s,
+                        ooz_cohorts_in_window=self._ooz_cohorts_in_window,
                     )
                 except RuntimeError:
                     _emit(
@@ -2488,12 +2811,14 @@ class MiningEngine:
                     logging.INFO,
                     "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
                     "attempts=%d arr=%.2f zone_p=%.2f slots=%d/8 "
-                    "open_age=%.1fs (min=%ds, budget=%ds)",
+                    "open_age=%.1fs (min=%ds, eff_budget=%.0fs) "
+                    "ooz_blk=%d",
                     state.window_n, prompt_idx,
                     _short_level(level), _short_subject(subject),
                     p_hat, attempts, arr, _zone_probability(p_hat),
                     state.valid_submissions,
-                    open_age_s, _OPEN_PHASE_MIN_S, _OPEN_PHASE_BUDGET_S,
+                    open_age_s, _OPEN_PHASE_MIN_S, _eff_budget_s,
+                    len(self._ooz_cohorts_in_window),
                 )
                 logger.debug(
                     "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
@@ -2640,15 +2965,15 @@ class MiningEngine:
                         # http_avg ≈ 70 s but cutting too aggressively
                         # when http_avg is low.
                         #
-                        # Formula: budget - http_avg - proof_avg - overgen_est.
-                        # Clamped to [60 s, budget × 0.8] so we always
-                        # allow over-gen early in the window but never
-                        # push the total pipeline past 80% of budget.
+                        # Anchored on _effective_open_budget_s() so the
+                        # deadline tightens automatically when the
+                        # observed-OPEN tracker sees the validator is
+                        # rolling early.
                         _chry_deadline := max(
-                            60.0,
+                            45.0,
                             min(
-                                float(_OPEN_PHASE_BUDGET_S) * 0.8,
-                                float(_OPEN_PHASE_BUDGET_S)
+                                self._effective_open_budget_s() * 0.8,
+                                self._effective_open_budget_s()
                                 - max(
                                     _DEADLINE_HTTP_DEFAULT_S,
                                     self._metrics.recent_http_avg_s(),
@@ -2754,11 +3079,23 @@ class MiningEngine:
                 # Local OUT_OF_ZONE short-circuit.
                 if not in_zone:
                     self._metrics.record_local_oos()
+                    # Remember the cohort so the picker will down-rank
+                    # any future candidate from it for the rest of
+                    # this window. Without this, the picker keeps
+                    # drawing from the same saturated cohort and
+                    # burning successive GEN cycles on guaranteed
+                    # k=8 outcomes (see W=957 trace: 3× picks from
+                    # Prealgebra cohorts all OOZ before the window
+                    # rolled).
+                    self._ooz_cohorts_in_window.add((level, subject))
                     _emit(
                         logging.INFO,
-                        "[W=%d] OOZ  prompt=%-4d sigma=%.3f<%.2f k=%d/%d -> skip submit",
+                        "[W=%d] OOZ  prompt=%-4d sigma=%.3f<%.2f k=%d/%d "
+                        "cohort=(%s,%s) -> skip submit (cohort blacklisted "
+                        "for window)",
                         state.window_n, prompt_idx, sigma, SIGMA_MIN,
                         k_solved, M_ROLLOUTS,
+                        _short_level(level), _short_subject(subject),
                     )
                     # Surface SUMMARY periodically even when skipping submit.
                     if self._metrics.generated % _SUMMARY_EVERY == 0:
@@ -2811,11 +3148,16 @@ class MiningEngine:
                         2.0,
                         (len(short_idxs) / M_ROLLOUTS) * (gen_ms / 1000.0),
                     )
+                    # Anchored on _effective_open_budget_s() so the
+                    # SHRT rescue deadline tightens automatically when
+                    # the observed-OPEN tracker sees the validator
+                    # rolling early — same fix as CHRY above.
+                    _shrt_eff_budget = self._effective_open_budget_s()
                     _shrt_deadline = max(
-                        60.0,
+                        45.0,
                         min(
-                            float(_OPEN_PHASE_BUDGET_S) * 0.8,
-                            float(_OPEN_PHASE_BUDGET_S)
+                            _shrt_eff_budget * 0.8,
+                            _shrt_eff_budget
                             - _http_s_shrt - _proof_s_shrt - _repl_est_s,
                         ),
                     )
@@ -2930,8 +3272,12 @@ class MiningEngine:
                 # match (same window, different phase), but the
                 # validator will refuse the submission.
                 _pre_proof_check_t: float | None = None
+                _pre_proof_probe_start = time.monotonic()
                 try:
-                    early_state = await get_window_state_v2(url, client=client)
+                    early_state = await get_window_state_v2(
+                        url, client=client,
+                        timeout=_STATE_PROBE_TIMEOUT_S,
+                    )
                     _pre_proof_check_t = time.monotonic()
                     _early_closed = (
                         early_state.window_n != state.window_n
@@ -2951,9 +3297,19 @@ class MiningEngine:
                         )
                         continue
                 except SubmissionError as _early_exc:
-                    logger.debug(
-                        "pre-proof state check failed: %s; proceeding to proof",
-                        _early_exc,
+                    # Promoted from DEBUG → INFO so the operator can see
+                    # when the validator's /state is throwing during a
+                    # rollover — previously these failures were silent
+                    # in INFO logs and masked the picker's miss.
+                    _pre_probe_ms = (
+                        time.monotonic() - _pre_proof_probe_start
+                    ) * 1000.0
+                    _emit(
+                        logging.INFO,
+                        "[W=%d] STATE-PROBE pre-proof failed in %.1fs "
+                        "(%s); proceeding to proof — post-proof check "
+                        "will catch any roll",
+                        state.window_n, _pre_probe_ms / 1000.0, _early_exc,
                     )
 
                 # Build GRAIL proofs.
@@ -3001,8 +3357,15 @@ class MiningEngine:
                 # short interval is negligible. Skipping the recheck
                 # saves a ~50-300 ms HTTP round-trip that would
                 # otherwise eat into the OPEN-window submit budget.
-                _skip_post_check_max_age_s = 4.0
-                _skip_post_check_max_proof_s = 4.0
+                # v4.2: tuned in lockstep with _STATE_PROBE_TIMEOUT_S
+                # = 5 s. A healthy /state poll takes ~50-300 ms; the
+                # 8 s ceiling accommodates one slow probe (up to 5 s)
+                # PLUS up to ~3 s of proof build before the fast-path
+                # skip is invalidated. Slow probes are not a "window
+                # rolled" signal — they're just network jitter — so
+                # forcing a second probe would only waste another ~5 s.
+                _skip_post_check_max_age_s = 8.0
+                _skip_post_check_max_proof_s = 5.0
                 _can_skip_post_check = (
                     _pre_proof_check_t is not None
                     and (time.monotonic() - _pre_proof_check_t)
@@ -3018,8 +3381,12 @@ class MiningEngine:
                         proof_ms / 1000.0,
                     )
                 else:
+                    _post_proof_probe_start = time.monotonic()
                     try:
-                        fresh_state = await get_window_state_v2(url, client=client)
+                        fresh_state = await get_window_state_v2(
+                            url, client=client,
+                            timeout=_STATE_PROBE_TIMEOUT_S,
+                        )
                         _post_closed = (
                             fresh_state.window_n != state.window_n
                             or fresh_state.state != WindowState.OPEN
@@ -3038,9 +3405,22 @@ class MiningEngine:
                             )
                             continue
                     except SubmissionError as e:
-                        logger.debug(
-                            "pre-submit state check failed: %s; proceeding",
-                            e,
+                        # Promoted from DEBUG → INFO. If the post-proof
+                        # /state probe times out, we DON'T know whether
+                        # the window rolled — fall through and try the
+                        # submit anyway. Worst case the validator
+                        # rejects with window_not_active and we record
+                        # that explicitly; best case we got lucky and
+                        # the window is still open. Either way, the
+                        # operator gets to see the state-probe failure.
+                        _post_probe_ms = (
+                            time.monotonic() - _post_proof_probe_start
+                        ) * 1000.0
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] STATE-PROBE post-proof failed in %.1fs "
+                            "(%s); firing submit anyway",
+                            state.window_n, _post_probe_ms / 1000.0, e,
                         )
 
                 request = BatchSubmissionRequest(
@@ -3114,6 +3494,54 @@ class MiningEngine:
             _pending_task = None
 
         return results
+
+    # ------------------------------------------------------------------
+    # Observed-OPEN-duration tracking (v4.2 picker realism)
+    # ------------------------------------------------------------------
+
+    def _record_observed_open_duration(self, duration_s: float) -> None:
+        """Record how long the previous window stayed in OPEN.
+
+        Called at each window-roll boundary with
+        ``now - _window_open_seen_at`` of the window that just closed.
+        Bounded to a sensible range so a freak partial observation
+        (e.g. miner started mid-window) doesn't poison the picker.
+        """
+        if duration_s <= 0:
+            return
+        # Discard absurdly short observations (< 30 s = miner restarted
+        # mid-window and saw the tail of OPEN, not a full OPEN phase).
+        # Cap at _OPEN_PHASE_BUDGET_S to keep arithmetic bounded — we
+        # don't believe any window lasts longer than the configured
+        # upper bound.
+        if duration_s < 30.0:
+            return
+        clamped = min(duration_s, float(_OPEN_PHASE_BUDGET_S))
+        self._observed_open_durations_s.append(clamped)
+
+    def _effective_open_budget_s(self) -> float:
+        """Return the realistic OPEN budget for the picker.
+
+        Until we have ≥ 3 observations, fall back to the configured
+        ``_OPEN_PHASE_BUDGET_S`` constant (we don't have enough data
+        to clamp confidently). Once we do, return
+        ``min(_OPEN_PHASE_BUDGET_S, observed_min × safety_factor)``
+        floored at ``_OBSERVED_OPEN_MIN_FLOOR_S`` so an unlucky run
+        of short windows never drives the budget so low that the
+        picker can't pick anything.
+
+        Using ``min`` rather than ``mean`` / ``p10`` is deliberate:
+        we want the WORST observed OPEN, because that's what's going
+        to cost us a submission. The safety factor adds 10 % margin
+        under that worst case for headroom.
+        """
+        if len(self._observed_open_durations_s) < 3:
+            return float(_OPEN_PHASE_BUDGET_S)
+        worst_observed = min(self._observed_open_durations_s)
+        effective = worst_observed * _OBSERVED_OPEN_SAFETY_FACTOR
+        effective = max(effective, _OBSERVED_OPEN_MIN_FLOOR_S)
+        effective = min(effective, float(_OPEN_PHASE_BUDGET_S))
+        return effective
 
     # ------------------------------------------------------------------
     # Proof-mode self-healing
