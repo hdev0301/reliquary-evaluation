@@ -237,6 +237,14 @@ half of a session.
     slack is comfortable. Over many picks this shifts the
     expected GEN time downward, leaving more headroom for HTTP.
 
+25. **Long-tail rollout penalty.** Persisted ``max_lens[prompt_idx]``
+    tracks the longest completion length ever observed per prompt (same
+    JSON file as ``min_lens``). If ``max_lens >= _LONG_COMPLETION_THRESHOLD_TOKENS``
+    (default 5600), the picker multiplies score by
+    ``_LONG_COMPLETION_PENALTY`` so prompts prone to runway generations
+    are down-ranked without touching the env prompt prefix (prompt-binding
+    safe).
+
 ``launcher-v3.py`` and ``main-v3.py`` continue to work unchanged — the
 MiningEngine constructor signature is identical to v3, including the
 ``stats_path`` kwarg. The vLLM adapter detection sentinel
@@ -554,6 +562,14 @@ _OVERGEN_MAX_K: int = M_ROLLOUTS - 1  # ... and k_solved <= this (= 7)
 # factor so the prompt is heavily down-ranked but not permanently
 # banned (a single one-off short gen could be a model fluke).
 _SHORT_COMPLETION_PENALTY: float = 0.10
+
+# Long-tail completion penalty (top-miner rollout alignment). Prompts whose
+# rollouts have ever reached this many completion tokens correlate with groups
+# that hit max-length runs (~8192) and churn GPU without reliable in-zone
+# groups. Multiply picker score when ``max_seen >= threshold`` — milder than
+# ``_SHORT_COMPLETION_PENALTY`` because long outputs are not a protocol fault.
+_LONG_COMPLETION_THRESHOLD_TOKENS: int = 5600
+_LONG_COMPLETION_PENALTY: float = 0.42
 
 # ───────────── Time-budget-aware picker penalties ─────────────
 # Picker estimates ``expected_pipeline_s = open_age + gen + proof +
@@ -1246,13 +1262,16 @@ async def _hf_download(repo_id: str, revision: str) -> str:
 class _PromptStats:
     """Beta-Bernoulli posterior with cohort priors and checkpoint versioning.
 
-    Six mappings, all atomically persistable to a single JSON blob:
+    Maps below (plus cohort in-zone rate) are persisted atomically to JSON:
 
       _counts[idx]              = (solves, attempts)              per-prompt counts
       _last_checkpoint[idx]     = int                              checkpoint these counts grew on
       _cohort_counts[(L, S)]    = (solves, attempts)              MATH (level, subject) cell
       _cohort_last_checkpoint[(L, S)] = int                        cohort checkpoint tag
+      _cohort_inzone[(L, S)]    = (in-zone groups, total groups)
       _lengths[idx]             = (mean_len, n_obs)                completion-length tiebreak
+      _min_lens[idx]           = int                               min observed completion length
+      _max_lens[idx]           = int                               max observed completion length
       _arrival_ema[idx]         = float ∈ [0, 1]                   "popular among smart miners"
       _superseded_lifetime[idx] = int                              forensic: cumulative SUPERSEDED
 
@@ -1279,6 +1298,7 @@ class _PromptStats:
         "_cohort_inzone",
         "_lengths",
         "_min_lens",
+        "_max_lens",
         "_arrival_ema",
         "_superseded_lifetime",
         "_last_cooldown_set",
@@ -1301,6 +1321,9 @@ class _PromptStats:
         # from ``_lengths`` (which tracks the mean for tie-break) so a
         # one-off short gen leaves a permanent dent.
         self._min_lens: dict[int, int] = {}
+        # Maximum observed completion length per prompt. Picker penalizes
+        # prompts whose rollouts ever hit the long-tail band (cheap GPU churn).
+        self._max_lens: dict[int, int] = {}
         self._arrival_ema: dict[int, float] = {}
         self._superseded_lifetime: dict[int, int] = {}
         self._last_cooldown_set: frozenset[int] = frozenset()
@@ -1438,6 +1461,15 @@ class _PromptStats:
         m = self._min_lens.get(idx)
         return m is not None and m < threshold
 
+    def max_completion_len(self, idx: int) -> int | None:
+        """Longest observed completion length for ``idx``, or None if never measured."""
+        return self._max_lens.get(idx)
+
+    def has_long_completion(self, idx: int, threshold: int) -> bool:
+        """True if any observed rollout for ``idx`` reached at least ``threshold`` tokens."""
+        m = self._max_lens.get(idx)
+        return m is not None and m >= threshold
+
     # ------------------------- updates -------------------------
 
     def record_group(
@@ -1498,6 +1530,10 @@ class _PromptStats:
             stored_min = self._min_lens.get(prompt_idx)
             if stored_min is None or cur_min < stored_min:
                 self._min_lens[prompt_idx] = cur_min
+            cur_max = max(completion_lens)
+            stored_max = self._max_lens.get(prompt_idx)
+            if stored_max is None or cur_max > stored_max:
+                self._max_lens[prompt_idx] = cur_max
 
     def record_cooldown_diff(self, new_cooldown_set: set[int] | list[int]) -> None:
         """Update arrival_ema from prompts that newly entered cooldown.
@@ -1613,6 +1649,7 @@ class _PromptStats:
             },
             "lengths": {str(k): list(v) for k, v in self._lengths.items()},
             "min_lens": {str(k): v for k, v in self._min_lens.items()},
+            "max_lens": {str(k): v for k, v in self._max_lens.items()},
             "arrival_ema": {str(k): v for k, v in self._arrival_ema.items()},
             "superseded_lifetime": {
                 str(k): v for k, v in self._superseded_lifetime.items()
@@ -1647,13 +1684,15 @@ class _PromptStats:
             int(k): (float(v[0]), int(v[1]))
             for k, v in (payload.get("lengths") or {}).items()
         }
-        # ``min_lens`` is optional in the payload: pre-v4.1 stats files
-        # don't have it, in which case we simply start with an empty
-        # dict and rebuild as new observations land. No schema bump
-        # needed because the field is purely additive.
+        # ``min_lens`` / ``max_lens`` are optional: older stats files omit
+        # them; rebuild as new observations land. Additive — no schema bump.
         self._min_lens = {
             int(k): int(v)
             for k, v in (payload.get("min_lens") or {}).items()
+        }
+        self._max_lens = {
+            int(k): int(v)
+            for k, v in (payload.get("max_lens") or {}).items()
         }
 
         schema = int(payload.get("schema", 1))
@@ -1749,11 +1788,15 @@ def pick_prompt_idx(
         short_mul = _SHORT_COMPLETION_PENALTY if stats has ever
                     seen ``idx`` produce a < CHALLENGE_K rollout
                     else 1.0
+        long_mul  = _LONG_COMPLETION_PENALTY if stats has ever
+                    seen ``idx`` produce a rollout >= threshold
+                    (``_LONG_COMPLETION_THRESHOLD_TOKENS``)
+                    else 1.0
         ddl_mul   = _DEADLINE_HARD_PENALTY  if expected pipeline
                     finishes > 5 s past OPEN edge
                     _DEADLINE_SOFT_PENALTY if 0-5 s past edge
                     1.0 otherwise
-        score     = base * short_mul * ddl_mul
+        score     = base * short_mul * long_mul * ddl_mul
 
     Tiebreak: shorter average completion length (faster generation →
     earlier TCP arrival → more SUPERSEDED wins).
@@ -1855,6 +1898,10 @@ def pick_prompt_idx(
         # Short-completion penalty.
         if stats.has_short_completion(idx, short_completion_threshold):
             score *= _SHORT_COMPLETION_PENALTY
+
+        # Long-tail completion penalty (ever saw a very long rollout).
+        if stats.has_long_completion(idx, _LONG_COMPLETION_THRESHOLD_TOKENS):
+            score *= _LONG_COMPLETION_PENALTY
 
         # Time-budget penalty with length-scaled http estimate.
         avg_len_val = stats.avg_completion_len(idx)
