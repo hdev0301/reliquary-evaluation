@@ -798,6 +798,33 @@ class _MinerMetrics:
 
 
 # ---------------------------------------------------------------------------
+# Async submit context (captures everything needed to log/record a submit
+# result that arrives after the generating loop has already moved on)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _SubmitCtx:
+    """Frozen snapshot of a generation's metadata for deferred SUB logging.
+
+    Created just before ``asyncio.create_task(_fire_submit(...))`` and
+    consumed by ``_drain_submit`` at the top of the next loop iteration
+    when the HTTP task is done.
+    """
+
+    prompt_idx: int
+    window_n: int
+    rewards: list
+    k_solved: int
+    sigma: float
+    merkle_root: str
+    proof_mode: str
+    gen_ms: float
+    proof_ms: float
+    gpu_pre: str
+    open_age_s: float
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint pull (carried from v3 — same logic, same interface)
 # ---------------------------------------------------------------------------
 
@@ -1818,6 +1845,99 @@ class MiningEngine:
                 connect=10.0, read=120.0, write=60.0, pool=10.0,
             ),
         ) as client:
+            # ── Async HTTP submit helpers ───────────────────────────────────
+            # The engine used to block on ``await submit_batch_v2(...)``
+            # (20-70 s), keeping the GPU idle the whole time.  Now we fire
+            # the HTTP call as an ``asyncio.Task`` and immediately loop back
+            # to PICK → GEN, so generation overlaps the network round-trip.
+            # The task result is drained at the top of the next iteration.
+            #
+            # Serialisation rule: at most one in-flight submit at a time
+            # (the validator only accepts one submission per miner per window
+            # slot anyway).  If the previous task is still running when we
+            # finish the next GEN+PROOF, we await it before creating a new
+            # one — but in practice GEN ≈ 36 s >> http_avg ≈ 20 s so the
+            # task is almost always done by then.
+
+            _pending_task: asyncio.Task | None = None
+            _pending_ctx: _SubmitCtx | None = None
+
+            async def _fire_submit(req: "BatchSubmissionRequest") -> tuple:
+                """Run submit_batch_v2 and return (resp, http_ms, gpu_post)."""
+                _t = time.monotonic()
+                _resp = await submit_batch_v2(
+                    url, req, client=client, timeout=120.0,
+                )
+                _http_ms = (time.monotonic() - _t) * 1000.0
+                _gpu_post = _gpu_mem_compact(self.vllm_gpu)
+                return _resp, _http_ms, _gpu_post
+
+            async def _drain_submit(
+                task: "asyncio.Task",
+                ctx: "_SubmitCtx",
+            ) -> None:
+                """Await a submit task and handle logging / metrics."""
+                try:
+                    resp, http_ms, gpu_post = await task
+                    reason_str = (
+                        resp.reason.value
+                        if hasattr(resp.reason, "value")
+                        else str(resp.reason)
+                    ) if resp.reason is not None else "submitted"
+                    self._metrics.record(resp.accepted, reason_str)
+                    self._metrics.record_http_latency(http_ms)
+                    if reason_str == "superseded":
+                        self._superseded_in_window.add(ctx.prompt_idx)
+                        self._prompt_stats.record_superseded(ctx.prompt_idx)
+                    self._maybe_check_proof_fallback()
+                    status = (
+                        "QUEUED"
+                        if resp.accepted and reason_str == "submitted"
+                        else ("ACCEPTED" if resp.accepted else "REJECTED")
+                    )
+                    _emit(
+                        logging.INFO if resp.accepted else logging.WARNING,
+                        "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
+                        "sigma=%.3f merkle=%s proof=%s gen=%.1fs "
+                        "proof=%.1fs http=%.2fs gpu=%s->%s "
+                        "open_age=%.1fs -> %s reason=%s",
+                        ctx.window_n, ctx.prompt_idx,
+                        _fmt_rewards(ctx.rewards),
+                        ctx.k_solved, M_ROLLOUTS, ctx.sigma,
+                        ctx.merkle_root[:8], ctx.proof_mode,
+                        ctx.gen_ms / 1000.0, ctx.proof_ms / 1000.0,
+                        http_ms / 1000.0,
+                        ctx.gpu_pre, gpu_post, ctx.open_age_s,
+                        status, reason_str,
+                    )
+                    results.append(resp)
+                except SubmissionError as _sub_exc:
+                    self._metrics.record_network_error()
+                    _emit(
+                        logging.ERROR,
+                        "[W=%d] ERR  prompt=%-4d submit failed: %s",
+                        ctx.window_n, ctx.prompt_idx, _sub_exc,
+                    )
+                except Exception as _sub_exc:
+                    self._metrics.record_network_error()
+                    _emit(
+                        logging.ERROR,
+                        "[W=%d] ERR  prompt=%-4d submit unexpected: %s",
+                        ctx.window_n, ctx.prompt_idx, _sub_exc,
+                    )
+                # Periodic SUMMARY after any submit outcome.
+                if (
+                    self._metrics.submitted
+                    and self._metrics.submitted % _SUMMARY_EVERY == 0
+                ):
+                    _emit(
+                        logging.INFO,
+                        "=== SUMMARY === %s",
+                        self._metrics.summary(self._prompt_stats),
+                    )
+
+            # ───────────────────────────────────────────────────────────────
+
             while True:
                 try:
                     state = await get_window_state_v2(url, client=client)
@@ -1828,6 +1948,14 @@ class MiningEngine:
                     logger.debug("state fetch failed: %s", e)
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
+
+                # Drain any completed async submit from the previous
+                # iteration.  Done right after state fetch so `state` is
+                # fresh before we log / update superseded-in-window.
+                if _pending_task is not None and _pending_task.done():
+                    await _drain_submit(_pending_task, _pending_ctx)
+                    _pending_task = None
+                    _pending_ctx = None
 
                 # Checkpoint pull (no-op when remote ≤ local).
                 if state.checkpoint_n > local_n and state.checkpoint_revision:
@@ -2324,19 +2452,29 @@ class MiningEngine:
 
                 # Fast pre-proof window guard. Check window state RIGHT
                 # NOW — before spending 2-3 s building the proof —
-                # so we can abort early when the window already closed
-                # during generation or CHRY. The second /state check
-                # below (after proof) catches the smaller race of the
-                # window advancing *during* proof construction.
+                # so we can abort early when the window has already
+                # closed or moved to a non-OPEN phase (TRAINING /
+                # PUBLISHING) during generation or CHRY.
+                # Checking `state != OPEN` is what prevents the
+                # window_not_active rejection: the window_n may still
+                # match (same window, different phase), but the
+                # validator will refuse the submission.
                 try:
                     early_state = await get_window_state_v2(url, client=client)
-                    if early_state.window_n != state.window_n:
+                    _early_closed = (
+                        early_state.window_n != state.window_n
+                        or early_state.state != WindowState.OPEN
+                    )
+                    if _early_closed:
                         _emit(
                             logging.WARNING,
-                            "[W=%d] SKIP prompt=%-4d window advanced to %d "
-                            "before proof (gen=%.1fs) — saved proof build",
+                            "[W=%d] SKIP prompt=%-4d window no longer "
+                            "accepting (w=%d state=%s) before proof "
+                            "(gen=%.1fs) — saved proof build",
                             state.window_n, prompt_idx,
                             early_state.window_n,
+                            getattr(early_state.state, "value",
+                                    str(early_state.state)),
                             gen_ms / 1000.0,
                         )
                         continue
@@ -2371,16 +2509,27 @@ class MiningEngine:
 
                 merkle_root = _compute_merkle_root(rollout_submissions)
 
-                # Pre-submit /state recheck — abort doomed submits when
-                # the window rolled over during generation/proof.
+                # Post-proof /state recheck — abort doomed submits when
+                # the window rolled over or left OPEN during proof build.
+                # Mirrors the pre-proof guard: must check both window_n
+                # AND WindowState.OPEN so we catch window_not_active
+                # (same window_n, but now in TRAINING/PUBLISHING).
                 try:
                     fresh_state = await get_window_state_v2(url, client=client)
-                    if fresh_state.window_n != state.window_n:
+                    _post_closed = (
+                        fresh_state.window_n != state.window_n
+                        or fresh_state.state != WindowState.OPEN
+                    )
+                    if _post_closed:
                         _emit(
                             logging.WARNING,
-                            "[W=%d] SKIP prompt=%-4d window advanced to %d "
-                            "during build (gen=%.1fs proof=%.1fs)",
-                            state.window_n, prompt_idx, fresh_state.window_n,
+                            "[W=%d] SKIP prompt=%-4d window no longer "
+                            "accepting (w=%d state=%s) after proof "
+                            "(gen=%.1fs proof=%.1fs)",
+                            state.window_n, prompt_idx,
+                            fresh_state.window_n,
+                            getattr(fresh_state.state, "value",
+                                    str(fresh_state.state)),
                             gen_ms / 1000.0, proof_ms / 1000.0,
                         )
                         continue
@@ -2398,95 +2547,67 @@ class MiningEngine:
                     rollouts=rollout_submissions,
                     checkpoint_hash=local_hash,
                 )
-                # GPU mem snapshot BEFORE submit. After-snapshot is
-                # embedded in the SUB line so the operator can compare
-                # `gpu=A/B` (pre) to `gpu=C/B` (post). A C > A trend
-                # across many submissions = the memory leak we
-                # suspected when vLLM KV cache stayed allocated for
-                # over-long padded sequences.
-                gpu_pre = _gpu_mem_compact(self.vllm_gpu)
-                t_http = time.monotonic()
-                try:
-                    # Explicit ``timeout=120.0`` overrides the upstream
-                    # submitter's default of 60s. The submitter applies
-                    # whatever value we pass to EACH attempt via
-                    # ``cli.post(..., timeout=timeout)``, which trumps
-                    # the client-level ``httpx.Timeout`` we configured
-                    # at AsyncClient construction. 120s gives the
-                    # validator's GRAIL worker enough slack to verify
-                    # under load BEFORE the upstream's 3-retry loop
-                    # fires; without this, our first attempt times
-                    # out at 60s, the retry hits a fresh window, and
-                    # we get a guaranteed ``window_not_active`` on a
-                    # submission that would have been accepted.
-                    resp = await submit_batch_v2(
-                        url, request, client=client, timeout=120.0,
-                    )
-                    http_ms = (time.monotonic() - t_http) * 1000.0
-                    gpu_post = _gpu_mem_compact(self.vllm_gpu)
-                    reason_str = (
-                        resp.reason.value if hasattr(resp.reason, "value")
-                        else str(resp.reason)
-                    )
-                    self._metrics.record(resp.accepted, reason_str)
-                    self._metrics.record_http_latency(http_ms)
-                    if reason_str == "superseded":
-                        self._superseded_in_window.add(prompt_idx)
-                        self._prompt_stats.record_superseded(prompt_idx)
-                    self._maybe_check_proof_fallback()
-                    # ``reason=submitted`` is the validator's PROVISIONAL
-                    # sentinel: the request was queued on the async
-                    # worker but GRAIL has NOT yet run. The final
-                    # verdict (accept / silent reject for GRAIL_FAIL /
-                    # LOGPROB_MISMATCH / DISTRIBUTION_SUSPICIOUS) only
-                    # surfaces in the validator's logs and R2 archive;
-                    # the miner never sees a follow-up HTTP response.
-                    # Label it QUEUED in the SUB line so the operator
-                    # doesn't misread it as a confirmed accept.
-                    if resp.accepted:
-                        if reason_str == "submitted":
-                            status = "QUEUED"
-                        else:
-                            status = "ACCEPTED"
-                    else:
-                        status = "REJECTED"
-                    proof_mode = (
-                        "batched" if self._metrics.batched_proof_active
-                        else "per-rollout"
-                    )
-                    sub_level = logging.INFO if resp.accepted else logging.WARNING
-                    open_age_s = (
-                        time.monotonic() - self._window_open_seen_at
-                        if getattr(self, "_window_open_seen_at", None) is not None
-                        else 0.0
-                    )
-                    _emit(
-                        sub_level,
-                        "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
-                        "sigma=%.3f merkle=%s proof=%s gen=%.1fs proof=%.1fs "
-                        "http=%.2fs gpu=%s->%s open_age=%.1fs -> %s reason=%s",
-                        state.window_n, prompt_idx,
-                        _fmt_rewards(rewards), k_solved, M_ROLLOUTS, sigma,
-                        merkle_root[:8], proof_mode,
-                        gen_ms / 1000.0, proof_ms / 1000.0, http_ms / 1000.0,
-                        gpu_pre, gpu_post, open_age_s,
-                        status, reason_str,
-                    )
-                    results.append(resp)
-                except SubmissionError as exc:
-                    self._metrics.record_network_error()
-                    _emit(
-                        logging.ERROR,
-                        "[W=%d] ERR  prompt=%-4d submit failed: %s",
-                        state.window_n, prompt_idx, exc,
-                    )
 
-                if self._metrics.submitted and self._metrics.submitted % _SUMMARY_EVERY == 0:
-                    _emit(
-                        logging.INFO,
-                        "=== SUMMARY === %s",
-                        self._metrics.summary(self._prompt_stats),
+                # Serialise: if the previous submit task is still
+                # in-flight (rare — GEN ≈ 36 s > typical http ≈ 20 s)
+                # await it now so we never have two concurrent submits.
+                if _pending_task is not None and not _pending_task.done():
+                    logger.debug(
+                        "[W=%d] awaiting previous submit task before "
+                        "firing new one", state.window_n,
                     )
+                    await _drain_submit(_pending_task, _pending_ctx)
+                    _pending_task = None
+                    _pending_ctx = None
+
+                # Snapshot open_age and gpu at the moment we FIRE the
+                # submit (not when the response arrives) so the SUB log
+                # reflects when the request was actually sent.
+                _sub_open_age = (
+                    time.monotonic() - self._window_open_seen_at
+                    if self._window_open_seen_at is not None
+                    else 0.0
+                )
+                _pending_ctx = _SubmitCtx(
+                    prompt_idx=prompt_idx,
+                    window_n=state.window_n,
+                    rewards=rewards,
+                    k_solved=k_solved,
+                    sigma=sigma,
+                    merkle_root=merkle_root,
+                    proof_mode=(
+                        "batched"
+                        if self._metrics.batched_proof_active
+                        else "per-rollout"
+                    ),
+                    gen_ms=gen_ms,
+                    proof_ms=proof_ms,
+                    gpu_pre=_gpu_mem_compact(self.vllm_gpu),
+                    open_age_s=_sub_open_age,
+                )
+                # Fire HTTP in the background — the GPU is free to start
+                # the next PICK → GEN immediately.  The SUB log line and
+                # all metrics updates happen in _drain_submit at the top
+                # of the next iteration (or during the serialise await
+                # above if the next attempt also needs to submit).
+                _pending_task = asyncio.create_task(
+                    _fire_submit(request),
+                    name=f"submit-w{state.window_n}-p{prompt_idx}",
+                )
+                logger.debug(
+                    "[W=%d] submit task launched prompt=%d open_age=%.1fs; "
+                    "continuing to next pick immediately",
+                    state.window_n, prompt_idx, _sub_open_age,
+                )
+
+        # Drain any in-flight submit task before returning so its result
+        # lands in ``results`` and metrics are up-to-date for the caller.
+        if _pending_task is not None:
+            try:
+                await _drain_submit(_pending_task, _pending_ctx)
+            except asyncio.CancelledError:
+                pass
+            _pending_task = None
 
         return results
 
