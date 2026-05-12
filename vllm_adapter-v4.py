@@ -1,4 +1,4 @@
-"""vLLM adapter (v4 logging-hardened) — heartbeats during build/reload/generate.
+"""vLLM adapter (v4 logging-hardened, v4.2 log-trim).
 
 DEPLOYMENT:
 
@@ -9,56 +9,55 @@ the engine still detects this adapter via the ``_is_vllm_adapter``
 sentinel and calls ``generate(...)`` / ``reload(...)`` exactly the same
 way. Only the logging changed.
 
-What v4 fixes
-=============
+What v4 fixes (vs v3)
+=====================
 
-The v3 adapter logged only at the *boundary* of each blocking call:
+1. **No build heartbeat.** v3's ``LLM(...)`` constructor (60-90 s on
+   H200 + Qwen3-4B) emitted nothing between begin and done — a miner
+   box looked dead for over a minute every checkpoint reload, often
+   triggering operators to ``kill -9`` healthy processes. v4 spawns a
+   heartbeat thread (2 s ticks for the first 20 s, 5 s thereafter)
+   while ``LLM(...)`` runs.
 
-    vLLM build: model=... dtype=... ...
-    [60-90 seconds of silence while LLM(...) captures CUDA graphs]
-    vLLM ready on cuda:N
+v4.2 log-trim (current)
+=======================
 
-    vllm.generate begin n=8 prompt_len=412 max_new_tokens=8192
-    [heartbeat every 10s during generate — fine]
-    vllm.generate done elapsed_ms=24580 ...
+The engine-v4 path now wraps every ``generate(...)`` call in
+``asyncio.to_thread`` and emits its own ``GEN prompt=N gen=Ms`` line
+with the same timing info. The adapter's per-generate logging is
+therefore redundant and was actively hurting time-to-submit on
+chatty windows (each duplicate log line costs ~50-200 µs of CPU and
+fights for the same single-threaded asyncio reactor that's trying
+to ship the previous submit).
 
-There were two problems:
+This release REMOVES:
 
-1. **No build heartbeat.** The ``LLM(...)`` constructor is the longest
-   single blocking call in the entire miner pipeline (60-90 s on H200 +
-   Qwen3-4B). v3 emitted nothing between begin and done — a miner box
-   looked dead for over a minute every checkpoint reload, often
-   triggering operators to ``kill -9`` perfectly healthy processes.
+- ``vllm.generate begin/done`` log lines (engine's GEN line replaces).
+- The ``generate()`` heartbeat thread (the call is now off-loop, so
+  there's nothing to ``kill -9`` mid-generate).
+- All ``_stderr_print`` raw-fd duplicates on hot paths — bittensor
+  no longer clobbers handlers in the supported versions, and the
+  ``FlushingStreamHandler`` configured by ``setup_logging`` reliably
+  reaches stderr on its own.
+- The transformers-shim "patched ..." INFO line (moved to DEBUG; the
+  shim is idempotent and an operator only needs to see it when
+  debugging vLLM init).
 
-2. **Heartbeat too coarse for fast generation.** v3's 10 s heartbeat
-   misses the short-end of the latency distribution: 12-15 s generations
-   look identical to 8 s ones at INFO level. Fast race-mode picks (~5 s)
-   never heartbeat at all.
+This release KEEPS:
 
-v4:
+- ``vLLM build start/done`` INFO (once per session + per reload).
+- ``vLLM reload: A → B`` INFO (once per checkpoint).
+- The build/reload heartbeat (operators need a sign of life during
+  the 60-90 s ``LLM(...)`` construct).
+- Error / exception logging on the generate path.
 
-- ``_build()`` and ``reload()`` spawn a heartbeat thread that emits
-  every 2 s for the first 20 s, every 5 s thereafter. Includes the
-  stage label ("LLM(...) constructor") so an operator sees exactly
-  what's blocking.
-- ``generate()`` heartbeat fires every 5 s (was 10 s) with the same
-  back-off pattern. Once a generate is >30 s in, it slows to 10 s.
-- All log lines reach a flushing handler (configured by main-v4's
-  ``setup_logging``). Optional raw-fd duplicates: set
-  ``RELIQUARY_RAW_STDERR=1`` if logging is still invisible (same flag
-  as ``engine-v4`` ``_emit``).
-- Routine ``vllm.generate`` heartbeats and begin/done noise are at
-  DEBUG or trimmed so a normal PICK→GEN→SUB cycle stays ~3 INFO lines.
-
-All other paths (transformers shim, n=k batched sampling, padding) are
-unchanged.
+All other paths (transformers shim, n=k batched sampling, padding)
+are unchanged.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import threading
 import time
 from typing import Any
@@ -66,83 +65,18 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Heartbeat cadence. Two phases:
+# Build/reload heartbeat cadence. Two phases:
 #   - "fresh" : first ``_HEARTBEAT_FRESH_DURATION_S`` seconds use the fast
 #               interval so an operator immediately sees motion.
 #   - "settled" : afterwards we back off to a slower cadence to avoid
 #                 log spam during legitimately long completions.
+#
+# Only used during ``LLM(...) construct`` (build/reload paths). The
+# generate() path runs off-loop via asyncio.to_thread and is logged by
+# the engine's GEN line — no per-generate heartbeat thread is started.
 _HEARTBEAT_FRESH_INTERVAL_S = 2.0
 _HEARTBEAT_SETTLED_INTERVAL_S = 5.0
 _HEARTBEAT_FRESH_DURATION_S = 20.0
-
-# Generate-call heartbeat is much looser than build/reload. Generations
-# are routine work and the engine emits its own per-attempt PICK/GEN/SUB
-# lines bracketing them, so a heartbeat is only useful when a generation
-# is suspiciously slow. We skip the fresh-phase entirely (fresh_duration=0
-# means we go straight to settled), so for typical 10-30 s generations
-# the heartbeat thread emits zero ticks — only for >30 s slowdowns does
-# the operator start seeing tick lines.
-_GENERATE_HEARTBEAT_FRESH_INTERVAL_S = 30.0
-_GENERATE_HEARTBEAT_SETTLED_INTERVAL_S = 30.0
-_GENERATE_HEARTBEAT_FRESH_DURATION_S = 0.0
-
-
-# Bulletproof direct-write fd captured at module import time — i.e.
-# before bittensor / vllm / transformers had any chance to replace
-# sys.stderr or sys.__stderr__. ``os.dup(2)`` returns a NEW file
-# descriptor pointing at the underlying kernel stderr. Even if a
-# third-party lib does ``dup2(pipe_write, 2)`` to redirect stderr (as
-# bittensor's btlogging is known to do), our captured fd STILL points
-# at the original stderr, so ``os.write(_FD, ...)`` cannot be
-# intercepted or replayed. This is the only Python-level technique
-# that survives arbitrary userspace stream wrapping.
-try:
-    _RAW_STDERR_FD: int | None = os.dup(2)
-except OSError:
-    _RAW_STDERR_FD = None
-
-# Dedupe ring — drop identical (logger, msg) pairs emitted within
-# this window. Defends against any duplication mechanism we haven't
-# diagnosed yet (e.g. an upstream lib that hooks stderr at the C
-# layer BEFORE our os.dup runs).
-_DEDUPE_WINDOW_S = 0.5
-_dedupe_last: dict[str, float] = {}
-
-# Mirror ``engine-v4``: raw-fd duplicate is opt-in only.
-_RAW_STDERR_FLUSH = os.environ.get(
-    "RELIQUARY_RAW_STDERR", "",
-).strip().lower() in ("1", "true", "yes")
-
-
-def _stderr_print(msg: str) -> None:
-    """Optional direct write to the kernel-level stderr fd.
-
-    Disabled unless ``RELIQUARY_RAW_STDERR=1`` — the root
-    ``FlushingStreamHandler`` is the normal path; duplicates were only
-    useful when btlogging clobbered handlers.
-    """
-    if not _RAW_STDERR_FLUSH:
-        return
-    now = time.monotonic()
-    last_t = _dedupe_last.get(msg)
-    if last_t is not None and (now - last_t) < _DEDUPE_WINDOW_S:
-        _dedupe_last[msg] = now
-        return
-    _dedupe_last[msg] = now
-    if len(_dedupe_last) > 128:
-        cutoff = now - 60.0
-        for k in [k for k, t in _dedupe_last.items() if t < cutoff]:
-            del _dedupe_last[k]
-    line = msg if msg.endswith("\n") else msg + "\n"
-    try:
-        if _RAW_STDERR_FD is not None:
-            os.write(_RAW_STDERR_FD, line.encode("utf-8", "replace"))
-        else:
-            stream = getattr(sys, "__stderr__", None) or sys.stderr
-            stream.write(line)
-            stream.flush()
-    except Exception:
-        pass
 
 
 class _Heartbeat:
@@ -159,9 +93,10 @@ class _Heartbeat:
         heartbeat label='LLM(...) construct' tick=2 elapsed=4.0s
         ...
 
-    Two emit channels per tick (when raw flush is enabled):
-      - ``logger`` at ``tick_level`` (default INFO)
-      - optional raw fd write (``RELIQUARY_RAW_STDERR=1``)
+    Single emit channel per tick: the module logger at ``tick_level``.
+    v4.2 dropped the raw-stderr-fd duplicate path; the
+    ``FlushingStreamHandler`` configured by ``setup_logging`` reliably
+    reaches stderr on its own under the supported bittensor versions.
     """
 
     def __init__(
@@ -203,19 +138,16 @@ class _Heartbeat:
                 )
         elapsed = time.monotonic() - self._t0
         if exc_type is None:
-            line = (
-                f"heartbeat label='{self.label}' state=done "
-                f"elapsed={elapsed:.1f}s"
+            logger.log(
+                self.done_ok_level,
+                "heartbeat label='%s' state=done elapsed=%.1fs",
+                self.label, elapsed,
             )
-            logger.log(self.done_ok_level, line)
-            _stderr_print(line)
         else:
-            line = (
-                f"heartbeat label='{self.label}' state=fail "
-                f"elapsed={elapsed:.1f}s exc={exc_type.__name__}: {exc}"
+            logger.error(
+                "heartbeat label='%s' state=fail elapsed=%.1fs exc=%s: %s",
+                self.label, elapsed, exc_type.__name__, exc,
             )
-            logger.error(line)
-            _stderr_print(line)
 
     def _interval(self, elapsed: float) -> float:
         if elapsed < self.fresh_duration_s:
@@ -240,12 +172,11 @@ class _Heartbeat:
                         extra = " " + extra_str
                 except Exception:
                     pass
-            line = (
-                f"heartbeat label='{self.label}' tick={tick} "
-                f"elapsed={elapsed:.1f}s{extra}"
+            logger.log(
+                self.tick_level,
+                "heartbeat label='%s' tick=%d elapsed=%.1fs%s",
+                self.label, tick, elapsed, extra,
             )
-            logger.log(self.tick_level, line)
-            _stderr_print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +251,7 @@ def _patch_transformers_for_vllm() -> None:
                 pass
 
     if patched:
-        logger.info(
+        logger.debug(
             "patched all_special_tokens_extended on: %s "
             "(vLLM 0.7.x compat with transformers ≥ 4.50)",
             ", ".join(patched),
@@ -405,10 +336,6 @@ class VLLMAdapter:
             self._gpu_memory_utilization, self._enforce_eager,
             self._gpu_id, _gpu_mem_str(self._gpu_id),
         )
-        _stderr_print(
-            f"[vllm_adapter] LLM(...) construct begin model={model_path} "
-            f"gpu=cuda:{self._gpu_id}"
-        )
 
         gpu_id = self._gpu_id
 
@@ -431,7 +358,6 @@ class VLLMAdapter:
             "vLLM build done: ready on %s %s",
             self.device, _gpu_mem_str(self._gpu_id),
         )
-        _stderr_print(f"[vllm_adapter] LLM(...) construct done on {self.device}")
 
     def reload(self, local_path: str) -> None:
         """Rebuild the LLM pointing at a new checkpoint.
@@ -441,9 +367,6 @@ class VLLMAdapter:
         windows (the validator only republishes every 10 windows).
         """
         logger.info("vLLM reload: %s → %s", self._model_path, local_path)
-        _stderr_print(
-            f"[vllm_adapter] reload begin {self._model_path} -> {local_path}"
-        )
 
         if self._llm is not None:
             old = self._llm
@@ -457,7 +380,6 @@ class VLLMAdapter:
                 pass
 
         self._build(local_path)
-        _stderr_print(f"[vllm_adapter] reload done -> {local_path}")
 
     # ------------------------------------------------------------------
     # HuggingFace-compatible generate
@@ -508,38 +430,23 @@ class VLLMAdapter:
             max_tokens=int(max_new_tokens),
         )
 
-        logger.debug(
-            "vllm.generate begin n=%d prompt_len=%d max_new_tokens=%d "
-            "temperature=%.2f top_p=%.2f top_k=%d %s",
-            n, len(prompt_tokens), max_new_tokens,
-            temperature, top_p, vllm_top_k, _gpu_mem_str(self._gpu_id),
-        )
-        _stderr_print(
-            f"[vllm_adapter] generate begin n={n} prompt_len={len(prompt_tokens)} "
-            f"max_new={max_new_tokens}"
-        )
-
+        # v4.2: per-generate begin/done/heartbeat logging removed. The
+        # engine emits its own ``GEN prompt=N gen=Ms`` line with the
+        # same timing info, and ``asyncio.to_thread`` keeps the asyncio
+        # reactor responsive while the call runs — no more "operator
+        # thinks the process is dead and kill -9's it" failure mode that
+        # the v4 heartbeat was guarding against.
         t0 = time.monotonic()
-        gpu_id = self._gpu_id
         try:
-            with _Heartbeat(
-                f"vllm.generate n={n} prompt_len={len(prompt_tokens)}",
-                fresh_interval_s=_GENERATE_HEARTBEAT_FRESH_INTERVAL_S,
-                settled_interval_s=_GENERATE_HEARTBEAT_SETTLED_INTERVAL_S,
-                fresh_duration_s=_GENERATE_HEARTBEAT_FRESH_DURATION_S,
-                extra_fn=lambda: _gpu_mem_str(gpu_id),
-                tick_level=logging.DEBUG,
-                done_ok_level=logging.DEBUG,
-            ):
-                # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg; pass
-                # prompt as a TokensPrompt-shaped dict. Dict form works
-                # across 0.8.x–0.20.x without importing TokensPrompt
-                # (its module path changed between versions).
-                outputs = self._llm.generate(
-                    [{"prompt_token_ids": prompt_tokens}],
-                    sampling_params=params,
-                    use_tqdm=False,
-                )
+            # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg; pass
+            # prompt as a TokensPrompt-shaped dict. Dict form works
+            # across 0.8.x–0.20.x without importing TokensPrompt
+            # (its module path changed between versions).
+            outputs = self._llm.generate(
+                [{"prompt_token_ids": prompt_tokens}],
+                sampling_params=params,
+                use_tqdm=False,
+            )
         except Exception:
             logger.exception(
                 "vllm.generate raised after %.1fs",
@@ -547,18 +454,7 @@ class VLLMAdapter:
             )
             raise
 
-        elapsed_ms = (time.monotonic() - t0) * 1000.0
-
         request_output = outputs[0]
-        gen_lens = [len(c.token_ids) for c in request_output.outputs]
-        finish_reasons = [c.finish_reason for c in request_output.outputs]
-        logger.info(
-            "vllm.generate done n=%d elapsed_ms=%.0f gen_lens=%s finish=%s",
-            n, elapsed_ms, gen_lens, finish_reasons,
-        )
-        _stderr_print(
-            f"[vllm_adapter] generate done n={n} elapsed_ms={elapsed_ms:.0f}"
-        )
 
         rows: list[list[int]] = []
         for completion in request_output.outputs:

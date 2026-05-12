@@ -7,8 +7,12 @@ DEPLOYMENT (full v4 swap on the miner box):
     ├── vllm_adapter-v4.py          ← cp to vllm_adapter.py
     ├── reliquary/
     │   ├── miner/engine.py         ← cp engine-v4.py over this
+    │   ├── miner/submitter.py      ← cp submitter-v4.py over this (v4.2)
     │   └── environment/math.py     ← cp math-v4.py over this
     └── ...
+
+v4.2 adds multi-validator broadcast and fail-fast HTTP via the
+submitter-v4 overlay; see ``--max-validators`` and ``--http-timeout``.
 
 Run command (2-GPU H200 box, vLLM on cuda:0, proofs on cuda:1):
 
@@ -254,8 +258,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--hotkey", required=True)
     p.add_argument("--checkpoint", required=True,
                    help="HF repo id or local path to seed checkpoint")
-    p.add_argument("--validator-url", required=True,
-                   help="http://ip:port of the validator HTTP server")
+    p.add_argument("--validator-url", required=False, default="",
+                   help="http://ip:port of the validator HTTP server. "
+                        "Comma-separated to broadcast to multiple validators "
+                        "in parallel (v4.2). Empty = auto-discover from "
+                        "metagraph (recommended).")
+    p.add_argument("--max-validators", type=int, default=5,
+                   help="Maximum number of permitted validators to broadcast "
+                        "each /submit to (v4.2 multi-validator). Set to 1 to "
+                        "restore v3 single-validator behaviour. Ignored if "
+                        "--validator-url is set explicitly.")
+    p.add_argument("--http-timeout", type=float, default=30.0,
+                   help="Per-request HTTP timeout in seconds (v4.2). Fails "
+                        "fast on slow validators so the OPEN window isn't "
+                        "wedged by a single doomed POST.")
     p.add_argument("--vllm-gpu", type=int, default=0,
                    help="GPU index for vLLM generation (default: 0)")
     p.add_argument("--proof-gpu", type=int, default=1,
@@ -417,6 +433,24 @@ async def _amain(args: argparse.Namespace) -> int:
         vllm_model, hf_model = await asyncio.gather(vllm_task, hf_task)
 
     stats_path = args.stats_path or None
+    # Parse comma-separated --validator-url for multi-validator broadcast
+    # (v4.2). Trims whitespace and drops empty entries.
+    validator_urls_list: list[str] | None = None
+    if args.validator_url:
+        validator_urls_list = [
+            u.strip() for u in args.validator_url.split(",") if u.strip()
+        ]
+        logger.info(
+            "validator URL override: %d explicit URL(s) — %s",
+            len(validator_urls_list),
+            ",".join(validator_urls_list),
+        )
+    else:
+        logger.info(
+            "validator discovery: auto (up to max_validators=%d "
+            "from metagraph, http_timeout=%.1fs)",
+            args.max_validators, args.http_timeout,
+        )
     engine = MiningEngine(
         vllm_model=vllm_model,
         hf_model=hf_model,
@@ -426,14 +460,18 @@ async def _amain(args: argparse.Namespace) -> int:
         vllm_gpu=args.vllm_gpu,
         proof_gpu=args.proof_gpu,
         max_new_tokens=args.max_model_len,
-        validator_url_override=args.validator_url,
+        validator_url_override=None,
+        validator_urls_override=validator_urls_list,
+        max_validators=args.max_validators,
+        http_timeout_s=args.http_timeout,
         stats_path=stats_path,
     )
 
     subtensor = await _build_subtensor(args.network)
+    _val_str = args.validator_url or f"<auto-discover up to {args.max_validators}>"
     logger.info(
-        "miner ready: hotkey=%s validator=%s",
-        wallet.hotkey.ss58_address, args.validator_url,
+        "miner ready: hotkey=%s validator=%s http_timeout=%.1fs",
+        wallet.hotkey.ss58_address, _val_str, args.http_timeout,
     )
 
     try:

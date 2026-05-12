@@ -1,10 +1,101 @@
 """Miner engine v4 — accuracy picker + batched GRAIL + serial pipeline.
 
 DEPLOYMENT: this file replaces ``reliquary/miner/engine.py``. On the miner
-box, alongside the math env patch:
+box, alongside the math env patch AND the v4.2 submitter overlay:
 
-    cp engine-v4.py /root/reliquary/reliquary/miner/engine.py
-    cp math-v4.py   /root/reliquary/reliquary/environment/math.py
+    cp engine-v4.py    /root/reliquary/reliquary/miner/engine.py
+    cp math-v4.py      /root/reliquary/reliquary/environment/math.py
+    cp submitter-v4.py /root/reliquary/reliquary/miner/submitter.py
+
+The submitter overlay is REQUIRED for multi-validator broadcast
+(``discover_validator_urls`` and ``submit_batch_v2_multi``). Without
+it, the engine falls back to single-validator submission and logs a
+warning at startup — the engine still runs but you miss the ~N×
+weight EMA multiplier.
+
+OPTIONAL DEPENDENCY: ``pip install orjson`` to unlock 3-5× faster
+JSON encoding on the multi-MB /submit payload. The submitter
+auto-detects orjson and falls back to stdlib ``json`` if missing,
+so it's a free speedup whenever you can install it.
+
+What v4.2 adds (on top of v4)
+=============================
+
+1. **Multi-validator broadcast.** v4.0 picked ONE validator from the
+   metagraph and submitted there. Every other permitted validator
+   never saw our submissions → scored us 0 → our final on-chain
+   weight (averaged across the validator set via consensus) collapsed
+   by ~N. v4.2 discovers all permitted validators (up to
+   ``max_validators``, default 5) and broadcasts each /submit to all
+   of them in parallel. Each acceptor contributes one EMA tick to
+   our weight — directly closing the gap to top miners.
+
+2. **Window-roll cancellation.** When the OPEN window rolls (either
+   to a new window_n or to TRAINING/PUBLISHING) while a submit is
+   still in flight, the response is guaranteed to be window_mismatch
+   / window_not_active. v4.2 detects this in the poll loop and
+   cancels the doomed task, freeing the network for the next
+   attempt.
+
+3. **Hard pre-PICK deadline gate.** Below the picker's existing
+   per-prompt deadline penalty, v4.2 adds a HARD gate that skips
+   the pick entirely when ``open_age + http_avg + proof_avg + 5s``
+   exceeds the OPEN-phase budget. v4.0 would still PICK / GEN /
+   PROOF and only abort at the post-proof state recheck — wasting
+   30-60 s of GPU time on a doomed pipeline.
+
+4. **Fail-fast HTTP.** Pairs with submitter-v4's single-attempt
+   submit and 30 s default timeout (was 60-120 s with 3 retries).
+   A slow validator no longer wedges the OPEN window — we move on
+   in 30 s max.
+
+Time-efficiency additions (v4.2 polish)
+=======================================
+
+Generation, proof building, and HTTP submission must ALL fit inside
+the ~60 s OPEN-window budget. Every saved second is one more
+prompt slot we can claim. These changes attack each phase:
+
+5. **One-shot payload encoding.** submitter-v4's
+   ``submit_batch_v2_multi`` pays ``pydantic.model_dump(mode="json")``
+   exactly once for the whole broadcast (was: once per validator URL,
+   ~0.5-2 s × N). orjson is used when installed (``pip install orjson``)
+   for a further 3-5× JSON-encode speedup on the >5 MB body.
+
+6. **Validator-connection prewarm.** A cheap GET /state probes every
+   discovered validator at startup so the TCP/TLS handshake (~50-300
+   ms per host on the cold path) is amortized outside the OPEN
+   window. The first /submit lands on already-keep-alived sockets.
+
+7. **Off-loop GPU dispatch.** The blocking vLLM ``generate`` (~10-30 s)
+   and HF proof forward (~3-5 s) now run via ``asyncio.to_thread``.
+   Previously they froze httpx's reactor, silently delaying any
+   in-flight submit's TCP send/recv by the full GPU-call duration.
+   With the dispatch off-loop, the previous submit's response can
+   land while the GPU is busy — so the metrics + window-roll
+   detection stay current.
+
+8. **Length-aware deadline scoring.** The picker now scales
+   ``http_avg_s`` by ``avg_completion_len / 4096`` (clamped
+   [0.5, 2.5]) so long-completion prompts pay a proportionally
+   larger upload-time penalty than short-completion ones. Under
+   tight budgets the picker steers toward fast-uploading prompts.
+
+9. **Uplink-saturated overgen/SHRT skip.** When the rolling
+   ``http_avg_s`` exceeds ``_HIGH_HTTP_AVG_S = 45 s``, both
+   over-generation and short-rollout rescue are skipped up front:
+   no point spending another 10-30 s of GPU time on a submission
+   that can't fit through the uplink anyway.
+
+10. **Fast-path post-proof state check.** When the pre-proof
+    /state check was < 4 s ago AND proof took < 4 s, the post-proof
+    recheck is skipped — saving a 50-300 ms HTTP round-trip with
+    near-zero risk of a missed window transition in that window.
+
+11. **Mid-gen drain.** After each ``await asyncio.to_thread(gen)``,
+    we opportunistically drain any completed previous submit task.
+    Lets accept/reject + SUMMARY logs surface within tens of ms of
+    the network completing, not at the start of the NEXT iteration.
 
 ``launcher-v3.py`` and ``main-v3.py`` continue to work unchanged — the
 MiningEngine constructor signature is identical to v3, including the
@@ -283,6 +374,21 @@ _DEADLINE_PROOF_DEFAULT_S: float = 3.0
 _DEADLINE_HTTP_DEFAULT_S: float = 5.0
 _DEADLINE_HARD_PENALTY: float = 0.10  # > 5 s past deadline → score *= 0.10
 _DEADLINE_SOFT_PENALTY: float = 0.50  # 0-5 s past deadline → score *= 0.50
+# Reference completion length used to scale ``http_avg_s`` per-prompt.
+# A candidate with avg_len = _TYPICAL_AVG_LEN_FOR_UPLOAD gets the
+# unscaled http_avg estimate; longer prompts pay proportionally more.
+# 4096 chosen as the rough mid-point of observed completion lengths
+# on Qwen3-4B-Instruct MATH rollouts (range typically 800-8000 tok).
+_TYPICAL_AVG_LEN_FOR_UPLOAD: float = 4096.0
+
+# When http_avg climbs past this threshold the uplink is the dominant
+# bottleneck; skip overgen / SHRT rescue rather than burning more
+# generation time we can't afford to ship. The dynamic _chry_deadline
+# already does this implicitly, but a hard threshold lets us log a
+# clear "high_http_avg" reason instead of a generic deadline skip,
+# and avoids a corner case where the rolling proof_avg drops fast
+# enough to let _chry_deadline pass while http stays slow.
+_HIGH_HTTP_AVG_S: float = 45.0
 
 
 # ---------------------------------------------------------------------------
@@ -1467,12 +1573,30 @@ def pick_prompt_idx(
         # The ~60 s OPEN-phase budget is finite; if our pipeline
         # crosses it, the submission lands in TRAINING/PUBLISHING
         # and gets WINDOW_NOT_ACTIVE rejected.
+        #
+        # v4.2 length-aware upload estimate: the HTTP payload scales
+        # roughly linearly with total token count (per-token GRAIL
+        # commitments + per-token logprobs). ``http_avg_s`` is the
+        # rolling average across recent submits — but a candidate with
+        # avg_len=8192 will upload ~2× longer than one with avg_len=2048
+        # at the same uplink speed. Scale http_avg_s by
+        # ``avg_len / _TYPICAL_AVG_LEN_FOR_UPLOAD`` (clamped) so the
+        # picker prefers shorter prompts when budget is tight.
         if open_budget_s != float("inf"):
             avg_len = stats.avg_completion_len(idx)
             if avg_len is not None and _TOKENS_PER_SEC_EST > 0:
                 expected_gen_s = float(avg_len) / _TOKENS_PER_SEC_EST
+                # Clamp length factor to [0.5, 2.5] so a single long
+                # outlier prompt doesn't get exiled forever and a
+                # super-short prompt doesn't underestimate the fixed
+                # cost of TCP/TLS + header round-trip.
+                _length_factor = max(
+                    0.5,
+                    min(2.5, float(avg_len) / _TYPICAL_AVG_LEN_FOR_UPLOAD),
+                )
+                expected_http_s = http_avg_s * _length_factor
                 expected_finish_s = (
-                    open_age_s + expected_gen_s + proof_avg_s + http_avg_s
+                    open_age_s + expected_gen_s + proof_avg_s + expected_http_s
                 )
                 slack_s = open_budget_s - expected_finish_s
                 if slack_s < -5.0:
@@ -1558,6 +1682,9 @@ class MiningEngine:
         proof_gpu: int = 1,
         max_new_tokens: int = MAX_NEW_TOKENS_PROTOCOL_CAP,
         validator_url_override: str | None = None,
+        validator_urls_override: list[str] | None = None,
+        max_validators: int = 5,
+        http_timeout_s: float = 30.0,
         stats_path: str | None = _DEFAULT_STATS_PATH,
         batched_proof: bool = True,
     ) -> None:
@@ -1570,6 +1697,31 @@ class MiningEngine:
         self.proof_gpu = proof_gpu
         self.max_new_tokens = max_new_tokens
         self.validator_url_override = validator_url_override
+        # Multi-validator broadcast (v4.2). When ``validator_urls_override``
+        # is None, the engine discovers up to ``max_validators`` permitted
+        # validators from the metagraph and broadcasts every /submit to
+        # all of them in parallel. This multiplies the effective EMA
+        # weight contribution per submission by ~N (each validator scores
+        # us independently). Backward compatibility: if only
+        # ``validator_url_override`` is given, we treat it as a 1-element
+        # list.
+        if validator_urls_override:
+            self.validator_urls_override: list[str] | None = list(validator_urls_override)
+        elif validator_url_override:
+            self.validator_urls_override = [validator_url_override]
+        else:
+            self.validator_urls_override = None
+        self.max_validators = max_validators
+        # Per-request HTTP timeout. Lowered from v3's 60 s to 30 s by
+        # default so a single slow validator doesn't cost us the whole
+        # OPEN window. The validator's /submit endpoint enqueues and
+        # returns immediately once the body upload completes — so 30 s
+        # is plenty for the upload itself on any reasonable uplink.
+        self.http_timeout_s = http_timeout_s
+        # Resolved per-mine-window list of validator URLs. Populated by
+        # ``_resolve_validator_urls`` at the top of ``mine_window``;
+        # re-discovered on every metagraph fetch.
+        self._validator_urls: list[str] = []
 
         from reliquary.shared.hf_compat import resolve_hidden_size
         from reliquary.protocol.grail_verifier import GRAILVerifier
@@ -1787,6 +1939,35 @@ class MiningEngine:
         from reliquary.protocol.submission import (
             BatchSubmissionRequest, WindowState,
         )
+        # Multi-validator broadcast support (v4.2). The submitter module
+        # may have been overlaid with submitter-v4 which exposes the
+        # plural ``discover_validator_urls`` and ``submit_batch_v2_multi``.
+        # We import them lazily and fall back to single-validator if
+        # the running submitter is upstream-v3 (no plural helpers).
+        try:
+            from reliquary.miner.submitter import (
+                discover_validator_urls as _discover_validator_urls,
+                submit_batch_v2_multi as _submit_batch_v2_multi,
+            )
+            _MULTI_VALIDATOR_AVAILABLE = True
+        except ImportError:
+            _discover_validator_urls = None  # type: ignore[assignment]
+            _submit_batch_v2_multi = None  # type: ignore[assignment]
+            _MULTI_VALIDATOR_AVAILABLE = False
+            logger.warning(
+                "[engine.v4] submitter does not expose multi-validator helpers "
+                "— falling back to single-validator submission. "
+                "Overlay submitter-v4.py onto /root/reliquary/reliquary/miner/submitter.py "
+                "to enable broadcast and reduce window_mismatch rejections."
+            )
+        # prewarm_connections is a v4.2 optional helper. Older submitter
+        # builds (no prewarm) → fall back to a no-op.
+        try:
+            from reliquary.miner.submitter import (
+                prewarm_connections as _prewarm_connections,
+            )
+        except ImportError:
+            _prewarm_connections = None  # type: ignore[assignment]
 
         # One-time logger reseat AFTER the submitter / submission /
         # bittensor-transitive imports above complete. Any of these
@@ -1809,15 +1990,34 @@ class MiningEngine:
             os.getpid(),
         )
 
-        if self.validator_url_override:
-            url = self.validator_url_override
+        # Resolve validator URLs once at startup. The PRIMARY url (the
+        # first in the list) drives /state polls; the FULL list is used
+        # for /submit broadcast so every validator that's online scores
+        # our submission, multiplying our weight EMA contribution.
+        if self.validator_urls_override:
+            urls = list(self.validator_urls_override)
+        elif self.validator_url_override:
+            urls = [self.validator_url_override]
         else:
             metagraph = await chain.get_metagraph(subtensor, chain.NETUID)
-            url = discover_validator_url(metagraph)
+            if _MULTI_VALIDATOR_AVAILABLE and _discover_validator_urls is not None:
+                urls = _discover_validator_urls(
+                    metagraph, max_n=self.max_validators,
+                )
+                if not urls:
+                    raise RuntimeError(
+                        "no permitted validator found on metagraph"
+                    )
+            else:
+                urls = [discover_validator_url(metagraph)]
+        self._validator_urls = urls
+        url = urls[0]  # primary URL for /state polls (kept for log compat)
         _emit(
             logging.INFO,
-            "[engine.v4] validator url=%s — entering poll/submit loop",
-            url,
+            "[engine.v4] validator urls (primary=%s, total=%d): %s "
+            "— entering poll/submit loop",
+            url, len(urls),
+            ",".join(urls) if len(urls) <= 8 else f"{','.join(urls[:8])},...",
         )
 
         rng = random.Random()
@@ -1826,25 +2026,80 @@ class MiningEngine:
         local_hash = ""
         last_window_n: int | None = None
 
-        # Generous HTTP timeouts. Reasoning per leg:
-        #   - connect=10s: long enough to absorb transient DNS / TCP
-        #     handshake hiccups but quickly surfaces a dead validator.
-        #   - read=120s: validator's GRAIL verification can take 30-90 s
-        #     under heavy load (batched_proof_active=True ships 8
-        #     rollouts × up to 8192 tokens). We've observed real
-        #     submissions taking 100+ s and getting ACCEPTED, so this
-        #     gives validator full slack before the upstream submitter
-        #     retries (and the retry, by definition, hits a fresh
-        #     window and gets window_not_active).
-        #   - write=60s: upload of the proof payload. The user has
-        #     observed WriteTimeout retries at the default 30s when
-        #     the validator's network is congested.
-        #   - pool=10s: connection-pool wait.
+        # v4.2 tightened HTTP timeouts + HTTP/2 keepalive.
+        #
+        # CRITICAL INSIGHT (server.py /submit): the validator's
+        # /submit endpoint enqueues the request on a background worker
+        # and returns IMMEDIATELY with ``SUBMITTED`` (the queue is
+        # unbounded, and the real GRAIL/logprob/distribution checks
+        # run async). So the only meaningful HTTP cost is the upload
+        # itself — for a 10-30 MB payload (8 rollouts × up to 8192
+        # tokens × per-token GRAIL commitments + logprobs), that's
+        # ~5-30 s on a typical box uplink.
+        #
+        # v3 used read=120s + 3 retries with 1s/2s/4s backoff. That
+        # gave a single doomed submit up to 247 s before giving up —
+        # the OPEN window has rolled at least three times by then
+        # and every retry hits window_mismatch.
+        #
+        # v4.2: short timeouts + zero submit retries via
+        # submitter-v4. Pool the connection (HTTP/2 keep-alive) so
+        # back-to-back submits to the same validator skip the TCP
+        # handshake.
+        _http_to_s = float(self.http_timeout_s)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(
-                connect=10.0, read=120.0, write=60.0, pool=10.0,
+                # connect: dead-validator check (DNS + TCP). Short so
+                # a dropped validator doesn't block our pipeline.
+                connect=5.0,
+                # read: response wait. The validator's /submit reply
+                # is < 1 KB (just BatchSubmissionResponse). 15 s is
+                # ample if the body uploaded — anything longer is
+                # almost certainly a wedged validator.
+                read=max(15.0, _http_to_s * 0.5),
+                # write: body upload. The bulk of the latency lives
+                # here for any non-LAN setup.
+                write=_http_to_s,
+                pool=5.0,
+            ),
+            # HTTP/2 keep-alive halves the per-submit TCP/TLS setup
+            # cost when broadcasting to the same set of validators
+            # window after window. Falls back to HTTP/1.1 transparently
+            # if httpx wasn't built with h2 support (which most
+            # default installs are).
+            http2=False,  # vLLM-stack envs often lack h2; safer default
+            limits=httpx.Limits(
+                max_keepalive_connections=max(8, len(self._validator_urls) * 2),
+                max_connections=max(16, len(self._validator_urls) * 4),
+                keepalive_expiry=120.0,
             ),
         ) as client:
+            # Pre-warm TCP/TLS to every discovered validator BEFORE the
+            # first OPEN window's submit. The handshake cost
+            # (DNS + TCP + TLS) is ~50-300 ms per host on the cold path
+            # — paying that during a /submit eats into the OPEN-window
+            # budget. Pre-warm here so the connection pool already
+            # has live keep-alived sockets by the time PICK → GEN →
+            # PROOF → SUBMIT fires the first batch.
+            if _prewarm_connections is not None and self._validator_urls:
+                try:
+                    _pw_t = time.monotonic()
+                    _pw_result = await _prewarm_connections(
+                        self._validator_urls,
+                        client=client,
+                        timeout=5.0,
+                    )
+                    _pw_ms = (time.monotonic() - _pw_t) * 1000.0
+                    _pw_ok = sum(1 for v in _pw_result.values() if v)
+                    _emit(
+                        logging.INFO,
+                        "[engine.v4] validator prewarm: %d/%d reachable "
+                        "in %.0fms (TCP/TLS pool primed)",
+                        _pw_ok, len(_pw_result), _pw_ms,
+                    )
+                except Exception as _pw_exc:
+                    logger.debug("prewarm_connections failed: %s", _pw_exc)
+
             # ── Async HTTP submit helpers ───────────────────────────────────
             # The engine used to block on ``await submit_batch_v2(...)``
             # (20-70 s), keeping the GPU idle the whole time.  Now we fire
@@ -1863,44 +2118,111 @@ class MiningEngine:
             _pending_ctx: _SubmitCtx | None = None
 
             async def _fire_submit(req: "BatchSubmissionRequest") -> tuple:
-                """Run submit_batch_v2 and return (resp, http_ms, gpu_post)."""
+                """Submit to ALL validators in parallel (v4.2 broadcast).
+
+                Returns ``(accepted, best_reason_str, max_http_ms,
+                gpu_post, per_url_breakdown)``. Falls back to
+                single-validator submission if submitter-v4 isn't
+                deployed (``_MULTI_VALIDATOR_AVAILABLE = False``).
+                """
                 _t = time.monotonic()
+                urls = self._validator_urls or [url]
+                if _MULTI_VALIDATOR_AVAILABLE and _submit_batch_v2_multi is not None and len(urls) > 1:
+                    multi = await _submit_batch_v2_multi(
+                        urls, req, client=client,
+                        timeout=self.http_timeout_s,
+                    )
+                    _http_ms = (time.monotonic() - _t) * 1000.0
+                    _gpu_post = _gpu_mem_compact(self.vllm_gpu)
+                    return (
+                        multi.accepted,
+                        (
+                            multi.best_reason.value
+                            if hasattr(multi.best_reason, "value")
+                            else str(multi.best_reason)
+                        ),
+                        _http_ms,
+                        _gpu_post,
+                        multi.per_url,
+                    )
+                # Single-validator path (v3 compatibility OR explicit
+                # single-URL override).
                 _resp = await submit_batch_v2(
-                    url, req, client=client, timeout=120.0,
+                    urls[0], req, client=client,
+                    timeout=self.http_timeout_s,
                 )
                 _http_ms = (time.monotonic() - _t) * 1000.0
                 _gpu_post = _gpu_mem_compact(self.vllm_gpu)
-                return _resp, _http_ms, _gpu_post
+                _reason_str = (
+                    _resp.reason.value
+                    if hasattr(_resp.reason, "value")
+                    else str(_resp.reason)
+                ) if _resp.reason is not None else "submitted"
+                return (
+                    _resp.accepted, _reason_str, _http_ms, _gpu_post,
+                    {urls[0]: (_resp, _http_ms, None)},
+                )
 
             async def _drain_submit(
                 task: "asyncio.Task",
                 ctx: "_SubmitCtx",
             ) -> None:
-                """Await a submit task and handle logging / metrics."""
+                """Await a (possibly broadcast) submit task and handle metrics."""
                 try:
-                    resp, http_ms, gpu_post = await task
-                    reason_str = (
-                        resp.reason.value
-                        if hasattr(resp.reason, "value")
-                        else str(resp.reason)
-                    ) if resp.reason is not None else "submitted"
-                    self._metrics.record(resp.accepted, reason_str)
+                    accepted, reason_str, http_ms, gpu_post, per_url = await task
+                    # All-network-error case: if EVERY validator threw a
+                    # network exception (no validator actually responded
+                    # with a structured BatchSubmissionResponse), this is a
+                    # network-error event, not a validator rejection. Track
+                    # separately so the SUMMARY net_err counter reflects
+                    # real connectivity issues rather than burying them
+                    # under the rejection bucket.
+                    n_validators = len(per_url) if per_url else 0
+                    n_responded = sum(
+                        1 for (r, _, _) in (per_url.values() if per_url else [])
+                        if r is not None
+                    )
+                    if n_validators > 0 and n_responded == 0:
+                        self._metrics.record_network_error()
+                    else:
+                        self._metrics.record(accepted, reason_str)
                     self._metrics.record_http_latency(http_ms)
                     if reason_str == "superseded":
+                        # SUPERSEDED is per-validator: another miner won
+                        # this prompt at that validator. We blacklist
+                        # the prompt for the current window regardless
+                        # because retrying at the same validator(s) is
+                        # a guaranteed loss.
                         self._superseded_in_window.add(ctx.prompt_idx)
                         self._prompt_stats.record_superseded(ctx.prompt_idx)
                     self._maybe_check_proof_fallback()
                     status = (
                         "QUEUED"
-                        if resp.accepted and reason_str == "submitted"
-                        else ("ACCEPTED" if resp.accepted else "REJECTED")
+                        if accepted and reason_str == "submitted"
+                        else ("ACCEPTED" if accepted else "REJECTED")
+                    )
+                    # Per-validator breakdown — folds N validators into
+                    # a compact ``v=A/B`` (accepted/total) string so a
+                    # broadcast SUB log stays single-line.
+                    n_validators = len(per_url)
+                    n_accepted = sum(
+                        1 for (r, _, _) in per_url.values()
+                        if r is not None and r.accepted
+                    )
+                    n_errors = sum(
+                        1 for (r, _, e) in per_url.values()
+                        if r is None and e is not None
+                    )
+                    multi_str = (
+                        f"v={n_accepted}/{n_validators}"
+                        + (f" net_err={n_errors}" if n_errors else "")
                     )
                     _emit(
-                        logging.INFO if resp.accepted else logging.WARNING,
+                        logging.INFO if accepted else logging.WARNING,
                         "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
                         "sigma=%.3f merkle=%s proof=%s gen=%.1fs "
                         "proof=%.1fs http=%.2fs gpu=%s->%s "
-                        "open_age=%.1fs -> %s reason=%s",
+                        "open_age=%.1fs %s -> %s reason=%s",
                         ctx.window_n, ctx.prompt_idx,
                         _fmt_rewards(ctx.rewards),
                         ctx.k_solved, M_ROLLOUTS, ctx.sigma,
@@ -1908,9 +2230,19 @@ class MiningEngine:
                         ctx.gen_ms / 1000.0, ctx.proof_ms / 1000.0,
                         http_ms / 1000.0,
                         ctx.gpu_pre, gpu_post, ctx.open_age_s,
-                        status, reason_str,
+                        multi_str, status, reason_str,
                     )
-                    results.append(resp)
+                    results.append((accepted, reason_str))
+                except asyncio.CancelledError:
+                    # Task cancelled by window-roll handler — log
+                    # quietly so the operator can correlate window
+                    # transitions with cancelled submits.
+                    _emit(
+                        logging.INFO,
+                        "[W=%d] CANCEL prompt=%-4d submit cancelled "
+                        "(window rolled before response landed)",
+                        ctx.window_n, ctx.prompt_idx,
+                    )
                 except SubmissionError as _sub_exc:
                     self._metrics.record_network_error()
                     _emit(
@@ -1953,6 +2285,39 @@ class MiningEngine:
                 # iteration.  Done right after state fetch so `state` is
                 # fresh before we log / update superseded-in-window.
                 if _pending_task is not None and _pending_task.done():
+                    await _drain_submit(_pending_task, _pending_ctx)
+                    _pending_task = None
+                    _pending_ctx = None
+
+                # WINDOW-ROLL CANCELLATION (v4.2). If a submit is still
+                # in flight but the window has already changed (or the
+                # validator state moved out of OPEN), the response is
+                # guaranteed to be ``window_mismatch`` /
+                # ``window_not_active``. Cancel the doomed task now so
+                # we free the network for the next submit ASAP. The
+                # task's ``_fire_submit`` body catches CancelledError
+                # via the surrounding ``_drain_submit`` handler — no
+                # leak.
+                if (
+                    _pending_task is not None
+                    and not _pending_task.done()
+                    and _pending_ctx is not None
+                    and (
+                        state.window_n != _pending_ctx.window_n
+                        or state.state != WindowState.OPEN
+                    )
+                ):
+                    _emit(
+                        logging.WARNING,
+                        "[W=%d] CANCEL pending submit prompt=%-4d "
+                        "(submitted at w=%d, now w=%d state=%s) — "
+                        "freeing network for next attempt",
+                        state.window_n, _pending_ctx.prompt_idx,
+                        _pending_ctx.window_n, state.window_n,
+                        getattr(state.state, "value", str(state.state)),
+                    )
+                    _pending_task.cancel()
+                    # Drain handles CancelledError gracefully.
                     await _drain_submit(_pending_task, _pending_ctx)
                     _pending_task = None
                     _pending_ctx = None
@@ -2023,6 +2388,50 @@ class MiningEngine:
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
+                # HARD PRE-PICK DEADLINE GATE (v4.2). When the OPEN
+                # window has been running long enough that the
+                # CHEAPEST possible attempt (just http_avg + proof_avg)
+                # would land past the budget, every PICK is doomed.
+                # Skip the pick entirely and idle until the window
+                # rolls — far better than burning a generate+proof
+                # cycle on a submit that will return window_mismatch.
+                _now_age_s = (
+                    time.monotonic() - self._window_open_seen_at
+                    if self._window_open_seen_at is not None
+                    else 0.0
+                )
+                _hard_http_s = max(
+                    _DEADLINE_HTTP_DEFAULT_S,
+                    self._metrics.recent_http_avg_s(),
+                )
+                _hard_proof_s = max(
+                    _DEADLINE_PROOF_DEFAULT_S,
+                    self._metrics.recent_proof_avg_s(),
+                )
+                # Floor on gen cost — even a length-cap-1 prompt
+                # takes ~5 s of vLLM warmup + sampling. Most prompts
+                # take 15-45 s, but we use a fast lower bound here
+                # because the picker's per-prompt avg_len gating
+                # already filters out slow prompts.
+                _hard_min_gen_s = 5.0
+                _min_pipeline_s = (
+                    _hard_http_s + _hard_proof_s + _hard_min_gen_s
+                )
+                _hard_deadline_s = float(_OPEN_PHASE_BUDGET_S) - _min_pipeline_s
+                if _now_age_s > _hard_deadline_s:
+                    _emit(
+                        logging.INFO,
+                        "[W=%d] WAIT open_age=%.1fs > hard_deadline=%.1fs "
+                        "(budget=%ds - http=%.1f - proof=%.1f - min_gen=%.1f) "
+                        "— window already too old to land a submit; "
+                        "idling 2s",
+                        state.window_n, _now_age_s, _hard_deadline_s,
+                        _OPEN_PHASE_BUDGET_S, _hard_http_s,
+                        _hard_proof_s, _hard_min_gen_s,
+                    )
+                    await asyncio.sleep(2.0)
+                    continue
+
                 # Pick.
                 cooldown_set = set(state.cooldown_prompts)
                 try:
@@ -2030,11 +2439,7 @@ class MiningEngine:
                     # averages where available so the picker's
                     # ``score *= ddl_mul`` reflects current network +
                     # proof cost rather than hard-coded guesses.
-                    _open_age_s = (
-                        time.monotonic() - self._window_open_seen_at
-                        if self._window_open_seen_at is not None
-                        else 0.0
-                    )
+                    _open_age_s = _now_age_s
                     _http_avg_s = (
                         self._metrics.recent_http_avg_s()
                         or _DEADLINE_HTTP_DEFAULT_S
@@ -2097,9 +2502,30 @@ class MiningEngine:
                 )
 
                 # Generate.
+                #
+                # v4.2: dispatch the (blocking) vLLM call to a worker
+                # thread via ``asyncio.to_thread`` so the event loop
+                # can service in-flight network I/O (the previous
+                # submit's body upload + response, /state polls, etc.)
+                # while the GPU is producing tokens. Without this, the
+                # ~10-30 s vLLM call freezes httpx's reactor, which is
+                # the silent cause of the previous submit completing
+                # 10-30 s LATER than it actually finished on the wire.
+                # vLLM's sync ``LLM.generate`` serializes through its
+                # own scheduler so the off-thread dispatch is safe.
                 t_gen = time.monotonic()
-                generations = self._generate_n_rollouts(problem, M_ROLLOUTS)
+                generations = await asyncio.to_thread(
+                    self._generate_n_rollouts, problem, M_ROLLOUTS,
+                )
                 gen_ms = (time.monotonic() - t_gen) * 1000.0
+                # Opportunistic drain: if the previous submit task
+                # completed during gen (likely now that to_thread frees
+                # the loop), record its result BEFORE we burn proof
+                # cycles. Lets metrics surface accept/reject sooner.
+                if _pending_task is not None and _pending_task.done():
+                    await _drain_submit(_pending_task, _pending_ctx)
+                    _pending_task = None
+                    _pending_ctx = None
                 if len(generations) < M_ROLLOUTS:
                     _emit(
                         logging.WARNING,
@@ -2167,6 +2593,27 @@ class MiningEngine:
                         if self._window_open_seen_at is not None
                         else 0.0
                     )
+                    _http_avg_now_s = self._metrics.recent_http_avg_s()
+                    # High-uplink-latency hard gate (v4.2). When recent
+                    # /submit traffic has been slow enough that adding
+                    # any extra generation will almost certainly miss
+                    # the OPEN-window edge, abandon over-gen up front
+                    # so we can ship what we have (or fall through to
+                    # the local OOZ short-circuit and pick a different
+                    # prompt). Skipping here is strictly faster than
+                    # letting the dynamic _chry_deadline catch it
+                    # because we also avoid the deadline-formula CPU
+                    # and the +4 generation queue setup cost.
+                    if _http_avg_now_s >= _HIGH_HTTP_AVG_S:
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] CHRY prompt=%-4d skipped "
+                            "(http_avg=%.1fs ≥ %.1fs — uplink saturated) "
+                            "k=%d/%d",
+                            state.window_n, prompt_idx,
+                            _http_avg_now_s, _HIGH_HTTP_AVG_S,
+                            k_solved, M_ROLLOUTS,
+                        )
                     # Skip over-gen on saturated groups (k=0 or k=8):
                     # at those extremes the model's per-rollout p is
                     # so close to {0, 1} that +4 more honest draws
@@ -2175,7 +2622,7 @@ class MiningEngine:
                     # Pay for over-gen only when we're near the in-zone
                     # boundary (k ∈ [1, 7]) where the same +4 has a
                     # ~40% recovery rate.
-                    if not (_OVERGEN_MIN_K <= k_solved <= _OVERGEN_MAX_K):
+                    elif not (_OVERGEN_MIN_K <= k_solved <= _OVERGEN_MAX_K):
                         _emit(
                             logging.INFO,
                             "[W=%d] CHRY prompt=%-4d skipped "
@@ -2232,7 +2679,8 @@ class MiningEngine:
                         self._metrics.record_overgen_attempt()
                         t_overgen = time.monotonic()
                         try:
-                            extra_gens = self._generate_n_rollouts(
+                            extra_gens = await asyncio.to_thread(
+                                self._generate_n_rollouts,
                                 problem, _OVERGEN_EXTRA,
                             )
                         except Exception as og_exc:
@@ -2372,9 +2820,24 @@ class MiningEngine:
                         ),
                     )
                     rescued = False
-                    if len(short_idxs) <= 2 and shrt_open_age_s <= _shrt_deadline:
+                    # High-uplink-latency hard gate (v4.2). Same logic
+                    # as the CHRY uplink gate: if the network is too
+                    # slow to fit another generation cycle inside the
+                    # OPEN window, skip the rescue. The rest of the
+                    # short-rollout handling will log a single "SHRT
+                    # skip" line below.
+                    _http_avg_now_shrt_s = self._metrics.recent_http_avg_s()
+                    _shrt_uplink_skip = (
+                        _http_avg_now_shrt_s >= _HIGH_HTTP_AVG_S
+                    )
+                    if (
+                        not _shrt_uplink_skip
+                        and len(short_idxs) <= 2
+                        and shrt_open_age_s <= _shrt_deadline
+                    ):
                         try:
-                            repl_gens = self._generate_n_rollouts(
+                            repl_gens = await asyncio.to_thread(
+                                self._generate_n_rollouts,
                                 problem, len(short_idxs),
                             )
                         except Exception as _shrt_exc:
@@ -2436,11 +2899,18 @@ class MiningEngine:
                                     new_min, new_inzone,
                                 )
                     if not rescued:
+                        _shrt_skip_reason = (
+                            f" (http_avg={_http_avg_now_shrt_s:.1f}s "
+                            f"≥ {_HIGH_HTTP_AVG_S:.1f}s — uplink saturated)"
+                            if _shrt_uplink_skip
+                            else ""
+                        )
                         _emit(
                             logging.INFO,
                             "[W=%d] SHRT prompt=%-4d min_clen=%d<%d -> skip submit "
-                            "(would fail validator LOGPROB_MISMATCH)",
+                            "(would fail validator LOGPROB_MISMATCH)%s",
                             state.window_n, prompt_idx, min_clen, CHALLENGE_K,
+                            _shrt_skip_reason,
                         )
                         if self._metrics.generated % _SUMMARY_EVERY == 0:
                             _emit(
@@ -2459,8 +2929,10 @@ class MiningEngine:
                 # window_not_active rejection: the window_n may still
                 # match (same window, different phase), but the
                 # validator will refuse the submission.
+                _pre_proof_check_t: float | None = None
                 try:
                     early_state = await get_window_state_v2(url, client=client)
+                    _pre_proof_check_t = time.monotonic()
                     _early_closed = (
                         early_state.window_n != state.window_n
                         or early_state.state != WindowState.OPEN
@@ -2485,9 +2957,17 @@ class MiningEngine:
                     )
 
                 # Build GRAIL proofs.
+                #
+                # v4.2: same off-loop dispatch as gen, for the same
+                # reason. Proof is shorter (~3-5 s) but on a slow
+                # uplink the previous submit's response may still be
+                # arriving — letting the event loop service those
+                # bytes during proof keeps the metrics current and
+                # frees the network for the next /submit ASAP.
                 t_proof = time.monotonic()
                 try:
-                    rollout_submissions = self._build_rollout_submissions(
+                    rollout_submissions = await asyncio.to_thread(
+                        self._build_rollout_submissions,
                         generations, rewards, randomness,
                     )
                 except Exception as proof_exc:
@@ -2514,30 +2994,54 @@ class MiningEngine:
                 # Mirrors the pre-proof guard: must check both window_n
                 # AND WindowState.OPEN so we catch window_not_active
                 # (same window_n, but now in TRAINING/PUBLISHING).
-                try:
-                    fresh_state = await get_window_state_v2(url, client=client)
-                    _post_closed = (
-                        fresh_state.window_n != state.window_n
-                        or fresh_state.state != WindowState.OPEN
-                    )
-                    if _post_closed:
-                        _emit(
-                            logging.WARNING,
-                            "[W=%d] SKIP prompt=%-4d window no longer "
-                            "accepting (w=%d state=%s) after proof "
-                            "(gen=%.1fs proof=%.1fs)",
-                            state.window_n, prompt_idx,
-                            fresh_state.window_n,
-                            getattr(fresh_state.state, "value",
-                                    str(fresh_state.state)),
-                            gen_ms / 1000.0, proof_ms / 1000.0,
-                        )
-                        continue
-                except SubmissionError as e:
+                #
+                # Skip-fast optimisation (v4.2): when the pre-proof
+                # /state check was recent AND the proof build was
+                # cheap, the chance of a window transition in that
+                # short interval is negligible. Skipping the recheck
+                # saves a ~50-300 ms HTTP round-trip that would
+                # otherwise eat into the OPEN-window submit budget.
+                _skip_post_check_max_age_s = 4.0
+                _skip_post_check_max_proof_s = 4.0
+                _can_skip_post_check = (
+                    _pre_proof_check_t is not None
+                    and (time.monotonic() - _pre_proof_check_t)
+                    < _skip_post_check_max_age_s
+                    and (proof_ms / 1000.0) < _skip_post_check_max_proof_s
+                )
+                if _can_skip_post_check:
                     logger.debug(
-                        "pre-submit state check failed: %s; proceeding",
-                        e,
+                        "[W=%d] post-proof state check skipped "
+                        "(pre-check age=%.1fs, proof=%.1fs) — fast path",
+                        state.window_n,
+                        time.monotonic() - (_pre_proof_check_t or time.monotonic()),
+                        proof_ms / 1000.0,
                     )
+                else:
+                    try:
+                        fresh_state = await get_window_state_v2(url, client=client)
+                        _post_closed = (
+                            fresh_state.window_n != state.window_n
+                            or fresh_state.state != WindowState.OPEN
+                        )
+                        if _post_closed:
+                            _emit(
+                                logging.WARNING,
+                                "[W=%d] SKIP prompt=%-4d window no longer "
+                                "accepting (w=%d state=%s) after proof "
+                                "(gen=%.1fs proof=%.1fs)",
+                                state.window_n, prompt_idx,
+                                fresh_state.window_n,
+                                getattr(fresh_state.state, "value",
+                                        str(fresh_state.state)),
+                                gen_ms / 1000.0, proof_ms / 1000.0,
+                            )
+                            continue
+                    except SubmissionError as e:
+                        logger.debug(
+                            "pre-submit state check failed: %s; proceeding",
+                            e,
+                        )
 
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,

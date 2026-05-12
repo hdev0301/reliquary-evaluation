@@ -1,13 +1,19 @@
 """Reliquary CLI — mine and validate commands (v4 logging-hardened variant).
 
 DEPLOYMENT: this file is the v4 variant of reliquary's CLI ``main.py``.
-Drop it over the upstream file on the miner box (alongside engine-v4 and
-math-v4):
+Drop it over the upstream file on the miner box, alongside the engine,
+math, vllm_adapter AND v4.2 submitter overlays:
 
-    cp main-v4.py        /root/reliquary/reliquary/cli/main.py
+    cp main-v4.py         /root/reliquary/reliquary/cli/main.py
     cp vllm_adapter-v4.py /root/reliquary/vllm_adapter.py
-    cp engine-v4.py      /root/reliquary/reliquary/miner/engine.py
-    cp math-v4.py        /root/reliquary/reliquary/environment/math.py
+    cp engine-v4.py       /root/reliquary/reliquary/miner/engine.py
+    cp math-v4.py         /root/reliquary/reliquary/environment/math.py
+    cp submitter-v4.py    /root/reliquary/reliquary/miner/submitter.py
+
+v4.2 multi-validator broadcast requires submitter-v4 (adds
+``discover_validator_urls`` and ``submit_batch_v2_multi``). Without
+it, the engine falls back to single-validator submission and logs a
+warning at startup.
 
 What v4 fixes
 =============
@@ -585,8 +591,30 @@ def mine(
     validator_url: str = typer.Option(
         "",
         help=(
-            "Override the validator URL (otherwise discovered from the metagraph). "
-            "Useful for local testing — e.g. http://127.0.0.1:8888"
+            "Override the validator URL(s). Comma-separated to broadcast "
+            "to multiple validators in parallel (v4.2). Empty = auto-discover "
+            "from the metagraph. Example: "
+            "http://1.2.3.4:8888,http://5.6.7.8:8888"
+        ),
+    ),
+    max_validators: int = typer.Option(
+        5,
+        help=(
+            "Maximum number of permitted validators to broadcast each /submit "
+            "to (v4.2 multi-validator). Each accepted submission contributes "
+            "to the EMA at that validator; broadcasting multiplies our final "
+            "on-chain weight by ~N. Ignored if --validator-url is set. "
+            "Set to 1 to restore v3 single-validator behaviour."
+        ),
+    ),
+    http_timeout_s: float = typer.Option(
+        30.0,
+        help=(
+            "Per-request HTTP timeout in seconds (v4.2). v3 used 60-120 s "
+            "which let one slow validator wedge the whole OPEN window; "
+            "30 s fails fast so the next attempt can fire. The validator's "
+            "/submit enqueues and returns immediately, so the timeout only "
+            "limits the body-upload phase."
         ),
     ),
     use_vllm: bool = typer.Option(
@@ -847,6 +875,25 @@ def mine(
                     _gpu_sync_and_clear(vllm_gpu)
                 return super()._load_checkpoint(*args, **kwargs)
 
+        # Parse comma-separated --validator-url. Trims whitespace and
+        # drops empty entries so " http://a:8888, http://b:8888 " works.
+        validator_urls_list: list[str] | None = None
+        if validator_url:
+            validator_urls_list = [
+                u.strip() for u in validator_url.split(",") if u.strip()
+            ]
+            logger.info(
+                "validator URL override: %d explicit URL(s) — %s",
+                len(validator_urls_list),
+                ",".join(validator_urls_list),
+            )
+        else:
+            logger.info(
+                "validator discovery: auto (up to max_validators=%d "
+                "from metagraph, http_timeout=%.1fs)",
+                max_validators, http_timeout_s,
+            )
+
         engine = _PatchedMiningEngine(
             vllm_model,
             hf_model,
@@ -855,7 +902,10 @@ def mine(
             env,
             vllm_gpu=vllm_gpu,
             proof_gpu=effective_proof_gpu,
-            validator_url_override=validator_url or None,
+            validator_url_override=None,
+            validator_urls_override=validator_urls_list,
+            max_validators=max_validators,
+            http_timeout_s=http_timeout_s,
             stats_path=(stats_path or None),
         )
         logger.info("MiningEngine constructed (patched for GPU sync on reload)")
