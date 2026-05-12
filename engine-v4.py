@@ -118,11 +118,26 @@ from reliquary.constants import (
     WINDOW_LENGTH,
 )
 
-# Estimated maximum OPEN-phase duration in seconds. ``WINDOW_LENGTH``
-# blocks at ``BLOCK_TIME_SECONDS`` each, plus a generous safety margin
-# for slow block production. Used to log ``open_age`` context in PICK
-# and to surface "submission is racing the window edge" diagnostics.
-_OPEN_PHASE_BUDGET_S = WINDOW_LENGTH * BLOCK_TIME_SECONDS  # = 5 * 12 = 60s
+# Expected maximum OPEN-phase duration in seconds. The protocol minimum
+# is ``WINDOW_LENGTH * BLOCK_TIME_SECONDS = 5 * 12 = 60s``, but the
+# validator's window stays OPEN until B_BATCH=8 distinct valid
+# submissions land (or ``WINDOW_TIMEOUT_SECONDS=7200`` fires). In
+# practice we observe windows of 1.5-3.5 minutes (slot fill is paced
+# by miner arrival rate, not by chain blocks). 240s is the empirical
+# upper end and is what the deadline-penalty picker uses to decide
+# whether a slow-completion candidate can fit before the seal.
+#
+# Kept as a module constant rather than per-window dynamic estimate
+# because (a) we don't have a clean signal for "seconds until seal"
+# from /state, and (b) over-estimating is safer than under-estimating
+# — an over-estimate means we MIGHT pick a slow prompt that misses
+# the deadline; an under-estimate would force the picker to skip
+# every candidate, starving the miner.
+_OPEN_PHASE_BUDGET_S: int = 240
+# Reference for the protocol minimum, kept for the PICK log line so
+# the operator can see the "ceiling" the chain enforces independently
+# of whatever the batcher's actual fill rate is.
+_OPEN_PHASE_MIN_S: int = WINDOW_LENGTH * BLOCK_TIME_SECONDS  # = 60
 from reliquary.infrastructure import chain
 from reliquary.protocol.submission import (
     BatchSubmissionRequest,
@@ -202,6 +217,72 @@ _BATCHED_PROOF_FAIL_THRESHOLD = 2
 # Reward threshold for "solved" — MATH rewards are {0, 1} but a
 # continuous reward env could ship via this engine unchanged.
 _SOLVED_THRESHOLD = 0.5
+
+# ───────────── Adaptive over-generation (cherry-pick) ─────────────
+# The protocol mandates ``M=8`` rollouts per submission but does NOT
+# mandate they be the FIRST 8 sampled. Each per-rollout validator
+# check (GRAIL, signature, logprobs, distribution, termination) is
+# computed against that single rollout's tokens — none of them
+# inspect WHICH 8 of N draws we chose. So when the initial M=8 group
+# is out-of-zone, we honestly draw ``_OVERGEN_EXTRA`` more rollouts
+# at the protocol temperature and assemble an in-zone subset of 8
+# from the combined pool (preferring rollouts with shorter completion
+# length so the proof + payload + HTTP cost stays minimal).
+#
+# Per-rollout statistics (per-token chosen-prob distribution, median
+# importance-sampling deviation, GRAIL sketches) are unchanged by
+# subset selection because each rollout is an honest sample. Group
+# sigma is the only statistic that subset-selection biases, and that's
+# the gate we're trying to clear by definition.
+#
+# Cost: ``_OVERGEN_EXTRA / M_ROLLOUTS ≈ 50%`` extra generation on the
+# ~40% of prompts whose first attempt was OOZ → ~+20% steady-state
+# generation cost for a ~+30 pp lift in submission in-zone rate on
+# marginal prompts. Set ``_OVERGEN_EXTRA = 0`` to disable.
+_OVERGEN_ENABLED: bool = True
+_OVERGEN_EXTRA: int = 4
+
+# Gate over-generation by remaining OPEN budget. If we're already
+# this many seconds into the OPEN phase, the extra rollouts will land
+# the submission past the window edge → guaranteed window_mismatch
+# even if we recover in-zone. Empirically observed window OPEN of
+# 1.5-3.5 min → 120 s lets over-gen run in the first half of typical
+# OPEN windows.
+_OVERGEN_MAX_OPEN_AGE_S: float = 120.0
+
+# Skip over-gen when the initial group's k_solved is at the saturated
+# ends of the spectrum. Probability of recovery is ~18% at k=8 (model
+# essentially solves at p>=0.95) and symmetric at k=0 — paying 15-30s
+# of extra generation for that recovery rate is net-negative when
+# k ∈ [1, 7] candidates exist with ~40% recovery. Tune wider (e.g.,
+# 0 / 8 → True) only if logs show the model is genuinely on the edge
+# at saturation (p ~ 0.9, not p ~ 1.0).
+_OVERGEN_MIN_K: int = 1  # over-gen only if k_solved >= this
+_OVERGEN_MAX_K: int = M_ROLLOUTS - 1  # ... and k_solved <= this (= 7)
+
+# ───────────── Short-completion blacklist / penalty ─────────────
+# Prompts that have ever produced a rollout with ``completion_length
+# < CHALLENGE_K=32`` will trigger the validator's LOGPROB_MISMATCH
+# pipeline silently if they reach /submit (the response is the
+# provisional SUBMITTED sentinel — the real reject only surfaces in
+# validator logs / R2 archive). Multiply the picker score by this
+# factor so the prompt is heavily down-ranked but not permanently
+# banned (a single one-off short gen could be a model fluke).
+_SHORT_COMPLETION_PENALTY: float = 0.10
+
+# ───────────── Time-budget-aware picker penalties ─────────────
+# Picker estimates ``expected_pipeline_s = open_age + gen + proof +
+# http`` and penalizes prompts whose expected_pipeline crosses the
+# OPEN-phase deadline. ``_TOKENS_PER_SEC_EST`` converts a prompt's
+# rolling ``avg_completion_len`` into a generation-time prediction;
+# 200 tok/s is conservative for Qwen3-4B-Instruct on H200 at vLLM's
+# default settings. _DEADLINE_PROOF_DEFAULT_S / _DEADLINE_HTTP_DEFAULT_S
+# are used until the rolling averages have at least one sample.
+_TOKENS_PER_SEC_EST: float = 200.0
+_DEADLINE_PROOF_DEFAULT_S: float = 3.0
+_DEADLINE_HTTP_DEFAULT_S: float = 5.0
+_DEADLINE_HARD_PENALTY: float = 0.10  # > 5 s past deadline → score *= 0.10
+_DEADLINE_SOFT_PENALTY: float = 0.50  # 0-5 s past deadline → score *= 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +597,56 @@ def _zone_status(rewards: list[float]) -> tuple[float, int, bool]:
     return sigma, k_solved, sigma >= SIGMA_MIN
 
 
+def _find_in_zone_subset(
+    pool_rewards: list[float],
+    pool_lens: list[int],
+    target_size: int = M_ROLLOUTS,
+) -> list[int] | None:
+    """Cherry-pick ``target_size`` indices from the pool so the chosen
+    subset's reward stddev clears the in-zone gate.
+
+    Algorithm (binary-reward Bernoulli case — MATH env):
+
+    1. Partition pool by reward into solves (``≥ _SOLVED_THRESHOLD``)
+       and fails.
+    2. The target k_solved range is ``[_K_LO, _K_HI]`` (= [2, 6] for
+       M=8 at SIGMA_MIN=0.43). Inside that range, k closer to
+       ``target_size // 2 = 4`` carries maximum sigma — try those first.
+    3. Within each {solves, fails} bucket, prefer rollouts with the
+       shortest ``completion_length``. Shorter completions → smaller
+       GRAIL proof payload → smaller /submit body → faster HTTP →
+       more headroom before the OPEN-window edge.
+
+    For continuous-reward envs this still works correctly because the
+    function only consumes ``_SOLVED_THRESHOLD``-thresholded counts to
+    decide subset composition; the actual rewards in the chosen subset
+    feed the validator's verbatim ``rewards_std`` check.
+
+    Returns ``None`` if no in-zone subset of ``target_size`` exists.
+    """
+    n = len(pool_rewards)
+    if n < target_size or len(pool_lens) != n:
+        return None
+
+    solves_idx = [i for i in range(n) if pool_rewards[i] >= _SOLVED_THRESHOLD]
+    fails_idx = [i for i in range(n) if pool_rewards[i] < _SOLVED_THRESHOLD]
+
+    solves_idx.sort(key=lambda i: pool_lens[i])
+    fails_idx.sort(key=lambda i: pool_lens[i])
+
+    mid_k = target_size // 2
+    target_ks = sorted(
+        range(_K_LO, min(_K_HI, target_size) + 1),
+        key=lambda k: (abs(k - mid_k), k),
+    )
+
+    for k in target_ks:
+        n_fails = target_size - k
+        if k <= len(solves_idx) and n_fails <= len(fails_idx):
+            return solves_idx[:k] + fails_idx[:n_fails]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Metrics — single-line summary the operator can grep
 # ---------------------------------------------------------------------------
@@ -548,6 +679,19 @@ class _MinerMetrics:
     # latency rather than by their own miner code.
     http_ms_recent: list[float] = field(default_factory=list)
     _http_ms_window: int = 20
+    # Rolling proof-construction time window (last N successful
+    # _build_rollout_submissions calls). Fed into the picker's
+    # deadline estimator alongside ``http_ms_recent`` so the score
+    # multiplier reflects the actual pipeline cost rather than a
+    # hard-coded guess.
+    proof_ms_recent: list[float] = field(default_factory=list)
+    _proof_ms_window: int = 20
+    # Adaptive over-generation counters.
+    #   overgen_attempts  — initial M=8 returned OOZ and we tried to
+    #                       cherry-pick from an expanded pool.
+    #   overgen_recoveries — cherry-pick found an in-zone subset.
+    overgen_attempts: int = 0
+    overgen_recoveries: int = 0
 
     def record_generation(self, k_solved: int) -> None:
         self.generated += 1
@@ -581,6 +725,26 @@ class _MinerMetrics:
         if not self.http_ms_recent:
             return 0.0
         return (sum(self.http_ms_recent) / len(self.http_ms_recent)) / 1000.0
+
+    def record_proof_latency(self, proof_ms: float) -> None:
+        """Append a successful proof-construction time."""
+        self.proof_ms_recent.append(proof_ms)
+        if len(self.proof_ms_recent) > self._proof_ms_window:
+            self.proof_ms_recent.pop(0)
+
+    def recent_proof_avg_s(self) -> float:
+        """Average of the last ``_proof_ms_window`` proof times, in seconds.
+        Returns 0.0 if no samples yet.
+        """
+        if not self.proof_ms_recent:
+            return 0.0
+        return (sum(self.proof_ms_recent) / len(self.proof_ms_recent)) / 1000.0
+
+    def record_overgen_attempt(self) -> None:
+        self.overgen_attempts += 1
+
+    def record_overgen_recovery(self) -> None:
+        self.overgen_recoveries += 1
 
     def record_local_oos(self) -> None:
         self.local_out_of_zone += 1
@@ -620,12 +784,23 @@ class _MinerMetrics:
         http_str = (
             f" http_avg={http_avg:.1f}s" if http_avg > 0 else ""
         )
+        if self.overgen_attempts > 0:
+            ogr_rate = (
+                self.overgen_recoveries / self.overgen_attempts * 100.0
+            )
+            overgen_str = (
+                f" overgen={self.overgen_recoveries}/{self.overgen_attempts}"
+                f"({ogr_rate:.0f}%)"
+            )
+        else:
+            overgen_str = ""
         return (
             f"generated={self.generated} in_zone={self.in_zone_rate:.1f}% "
             f"submitted={self.submitted} accepted={self.accepted} "
             f"({rate:.1f}%) rejected={self.rejected} "
             f"local_oos={self.local_out_of_zone} net_err={self.network_errors}"
-            f"{warm_str}{proof_str}{http_str} k_hist=[{k_str}] top=[{top_str}]"
+            f"{warm_str}{proof_str}{http_str}{overgen_str} "
+            f"k_hist=[{k_str}] top=[{top_str}]"
         )
 
 
@@ -703,6 +878,7 @@ class _PromptStats:
         "_cohort_counts",
         "_cohort_last_checkpoint",
         "_lengths",
+        "_min_lens",
         "_arrival_ema",
         "_superseded_lifetime",
         "_last_cooldown_set",
@@ -717,6 +893,13 @@ class _PromptStats:
         self._cohort_counts: dict[tuple[str, str], tuple[int, int]] = {}
         self._cohort_last_checkpoint: dict[tuple[str, str], int] = {}
         self._lengths: dict[int, tuple[float, int]] = {}
+        # Minimum observed completion length per prompt. Used by the
+        # picker to down-rank prompts that have ever produced a rollout
+        # < CHALLENGE_K (which the validator silently rejects with
+        # LOGPROB_MISMATCH if it reaches /submit). Stored separately
+        # from ``_lengths`` (which tracks the mean for tie-break) so a
+        # one-off short gen leaves a permanent dent.
+        self._min_lens: dict[int, int] = {}
         self._arrival_ema: dict[int, float] = {}
         self._superseded_lifetime: dict[int, int] = {}
         self._last_cooldown_set: frozenset[int] = frozenset()
@@ -839,6 +1022,21 @@ class _PromptStats:
         v = self._lengths.get(idx)
         return v[0] if v else None
 
+    def min_completion_len(self, idx: int) -> int | None:
+        """Minimum observed completion length for ``idx``, or None if
+        never observed. Picker uses this to detect prompts that have
+        produced rollouts shorter than the validator's CHALLENGE_K gate.
+        """
+        return self._min_lens.get(idx)
+
+    def has_short_completion(self, idx: int, threshold: int) -> bool:
+        """True if any observed rollout for ``idx`` was shorter than
+        ``threshold``. Picker uses this to apply the short-completion
+        penalty multiplier (``_SHORT_COMPLETION_PENALTY``).
+        """
+        m = self._min_lens.get(idx)
+        return m is not None and m < threshold
+
     # ------------------------- updates -------------------------
 
     def record_group(
@@ -882,6 +1080,13 @@ class _PromptStats:
             total_n = prev_n + len(completion_lens)
             new_mean = (prev_mean * prev_n + sum(completion_lens)) / total_n
             self._lengths[prompt_idx] = (new_mean, total_n)
+            # Update minimum observed completion length. This is the
+            # signal the picker uses to penalize prompts whose rollouts
+            # have ever fallen below the validator's CHALLENGE_K=32 gate.
+            cur_min = min(completion_lens)
+            stored_min = self._min_lens.get(prompt_idx)
+            if stored_min is None or cur_min < stored_min:
+                self._min_lens[prompt_idx] = cur_min
 
     def record_cooldown_diff(self, new_cooldown_set: set[int] | list[int]) -> None:
         """Update arrival_ema from prompts that newly entered cooldown.
@@ -964,6 +1169,7 @@ class _PromptStats:
                 for (level, subject), v in self._cohort_last_checkpoint.items()
             },
             "lengths": {str(k): list(v) for k, v in self._lengths.items()},
+            "min_lens": {str(k): v for k, v in self._min_lens.items()},
             "arrival_ema": {str(k): v for k, v in self._arrival_ema.items()},
             "superseded_lifetime": {
                 str(k): v for k, v in self._superseded_lifetime.items()
@@ -997,6 +1203,14 @@ class _PromptStats:
         self._lengths = {
             int(k): (float(v[0]), int(v[1]))
             for k, v in (payload.get("lengths") or {}).items()
+        }
+        # ``min_lens`` is optional in the payload: pre-v4.1 stats files
+        # don't have it, in which case we simply start with an empty
+        # dict and rebuild as new observations land. No schema bump
+        # needed because the field is purely additive.
+        self._min_lens = {
+            int(k): int(v)
+            for k, v in (payload.get("min_lens") or {}).items()
         }
 
         schema = int(payload.get("schema", 1))
@@ -1055,6 +1269,19 @@ def pick_prompt_idx(
     superseded_in_window: set[int] | None = None,
     candidates: int = _CANDIDATES_DEFAULT,
     max_attempts: int = 1000,
+    # Deadline-awareness context. The picker estimates each candidate's
+    # expected pipeline time (open_age + gen + proof + http) and
+    # penalizes prompts whose expected completion crosses the OPEN
+    # window edge. Defaults preserve the legacy behaviour (no penalty).
+    open_age_s: float = 0.0,
+    open_budget_s: float = float("inf"),
+    proof_avg_s: float = _DEADLINE_PROOF_DEFAULT_S,
+    http_avg_s: float = _DEADLINE_HTTP_DEFAULT_S,
+    # Short-completion gate. Prompts whose minimum-observed
+    # completion length is below this threshold get the
+    # ``_SHORT_COMPLETION_PENALTY`` multiplier applied to their score.
+    # CHALLENGE_K=32 is the validator's logprob-claim minimum.
+    short_completion_threshold: int = CHALLENGE_K,
 ) -> int:
     """Best-of-K Thompson-sampled prompt selection.
 
@@ -1066,7 +1293,15 @@ def pick_prompt_idx(
         p_sample  = rng.betavariate(a, b)
         zone_p    = P(K_LO ≤ Binomial(M, p_sample) ≤ K_HI)
         arrival_z = stats.arrival_rate(idx)       ∈ [0, 1]
-        score     = zone_p * (1 - _CONGESTION_WEIGHT * arrival_z)
+        base      = zone_p * (1 - _CONGESTION_WEIGHT * arrival_z)
+        short_mul = _SHORT_COMPLETION_PENALTY if stats has ever
+                    seen ``idx`` produce a < CHALLENGE_K rollout
+                    else 1.0
+        ddl_mul   = _DEADLINE_HARD_PENALTY  if expected pipeline
+                    finishes > 5 s past OPEN edge
+                    _DEADLINE_SOFT_PENALTY if 0-5 s past edge
+                    1.0 otherwise
+        score     = base * short_mul * ddl_mul
 
     Tiebreak: shorter average completion length (faster generation →
     earlier TCP arrival → more SUPERSEDED wins).
@@ -1141,6 +1376,32 @@ def pick_prompt_idx(
         zone_p = _zone_probability(p_sampled)
         arrival_z = stats.arrival_rate(idx)
         score = zone_p * (1.0 - _CONGESTION_WEIGHT * arrival_z)
+
+        # Short-completion penalty. Prompts that have ever produced
+        # a rollout shorter than CHALLENGE_K=32 are high-risk for
+        # LOGPROB_MISMATCH (silent reject in the validator's async
+        # worker); down-rank but don't permanently ban — a single
+        # short gen could be a model fluke.
+        if stats.has_short_completion(idx, short_completion_threshold):
+            score *= _SHORT_COMPLETION_PENALTY
+
+        # Time-budget penalty. Estimate expected pipeline completion
+        # for this candidate (open_age + gen_s + proof_s + http_s).
+        # The ~60 s OPEN-phase budget is finite; if our pipeline
+        # crosses it, the submission lands in TRAINING/PUBLISHING
+        # and gets WINDOW_NOT_ACTIVE rejected.
+        if open_budget_s != float("inf"):
+            avg_len = stats.avg_completion_len(idx)
+            if avg_len is not None and _TOKENS_PER_SEC_EST > 0:
+                expected_gen_s = float(avg_len) / _TOKENS_PER_SEC_EST
+                expected_finish_s = (
+                    open_age_s + expected_gen_s + proof_avg_s + http_avg_s
+                )
+                slack_s = open_budget_s - expected_finish_s
+                if slack_s < -5.0:
+                    score *= _DEADLINE_HARD_PENALTY
+                elif slack_s < 0.0:
+                    score *= _DEADLINE_SOFT_PENALTY
 
         if score > best_score:
             best_idx = idx
@@ -1587,12 +1848,33 @@ class MiningEngine:
                 # Pick.
                 cooldown_set = set(state.cooldown_prompts)
                 try:
+                    # Feed the deadline estimator with real rolling
+                    # averages where available so the picker's
+                    # ``score *= ddl_mul`` reflects current network +
+                    # proof cost rather than hard-coded guesses.
+                    _open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if self._window_open_seen_at is not None
+                        else 0.0
+                    )
+                    _http_avg_s = (
+                        self._metrics.recent_http_avg_s()
+                        or _DEADLINE_HTTP_DEFAULT_S
+                    )
+                    _proof_avg_s = (
+                        self._metrics.recent_proof_avg_s()
+                        or _DEADLINE_PROOF_DEFAULT_S
+                    )
                     prompt_idx = pick_prompt_idx(
                         self.env, cooldown_set,
                         rng=rng, stats=self._prompt_stats,
                         current_checkpoint_n=state.checkpoint_n,
                         slots_filled=state.valid_submissions,
                         superseded_in_window=self._superseded_in_window,
+                        open_age_s=_open_age_s,
+                        open_budget_s=float(_OPEN_PHASE_BUDGET_S),
+                        proof_avg_s=_proof_avg_s,
+                        http_avg_s=_http_avg_s,
                     )
                 except RuntimeError:
                     _emit(
@@ -1623,12 +1905,12 @@ class MiningEngine:
                     logging.INFO,
                     "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
                     "attempts=%d arr=%.2f zone_p=%.2f slots=%d/8 "
-                    "open_age=%.1f/%ds",
+                    "open_age=%.1fs (min=%ds, budget=%ds)",
                     state.window_n, prompt_idx,
                     _short_level(level), _short_subject(subject),
                     p_hat, attempts, arr, _zone_probability(p_hat),
                     state.valid_submissions,
-                    open_age_s, _OPEN_PHASE_BUDGET_S,
+                    open_age_s, _OPEN_PHASE_MIN_S, _OPEN_PHASE_BUDGET_S,
                 )
                 logger.debug(
                     "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
@@ -1679,6 +1961,134 @@ class MiningEngine:
                     sorted(completion_lens)[len(completion_lens) // 2],
                     max(completion_lens),
                 )
+
+                # Adaptive over-generation + cherry-pick.
+                # ---------------------------------------------------------
+                # If the initial M=8 group is out-of-zone, draw
+                # _OVERGEN_EXTRA more honest rollouts at T_PROTO and try
+                # to assemble an in-zone subset of M from the combined
+                # pool. Each rollout in the pool is a clean sample from
+                # the model's protocol-temperature distribution, so the
+                # validator's per-rollout statistical checks (GRAIL,
+                # logprob median dev, distribution q10, termination)
+                # all pass on whichever subset we ship. The protocol
+                # nowhere requires us to ship the FIRST M draws.
+                #
+                # Gated by remaining OPEN budget: skip when we're
+                # already past _OVERGEN_MAX_OPEN_AGE_S into the OPEN
+                # phase, because the extra gen would push the submit
+                # past the window edge and we'd lose to window_mismatch
+                # even after recovering in-zone.
+                if (
+                    not in_zone
+                    and _OVERGEN_ENABLED
+                    and _OVERGEN_EXTRA > 0
+                ):
+                    overgen_open_age_s = (
+                        time.monotonic() - self._window_open_seen_at
+                        if self._window_open_seen_at is not None
+                        else 0.0
+                    )
+                    # Skip over-gen on saturated groups (k=0 or k=8):
+                    # at those extremes the model's per-rollout p is
+                    # so close to {0, 1} that +4 more honest draws
+                    # have a ~15-20% chance of producing the opposite
+                    # outcome we need to assemble an in-zone subset.
+                    # Pay for over-gen only when we're near the in-zone
+                    # boundary (k ∈ [1, 7]) where the same +4 has a
+                    # ~40% recovery rate.
+                    if not (_OVERGEN_MIN_K <= k_solved <= _OVERGEN_MAX_K):
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] CHRY prompt=%-4d skipped "
+                            "(k=%d/%d saturated) — over-gen unlikely "
+                            "to flip outcome",
+                            state.window_n, prompt_idx,
+                            k_solved, M_ROLLOUTS,
+                        )
+                    elif overgen_open_age_s > _OVERGEN_MAX_OPEN_AGE_S:
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] CHRY prompt=%-4d skipped "
+                            "(open_age=%.1fs>%.1fs deadline) k=%d/%d",
+                            state.window_n, prompt_idx,
+                            overgen_open_age_s, _OVERGEN_MAX_OPEN_AGE_S,
+                            k_solved, M_ROLLOUTS,
+                        )
+                    else:
+                        self._metrics.record_overgen_attempt()
+                        t_overgen = time.monotonic()
+                        try:
+                            extra_gens = self._generate_n_rollouts(
+                                problem, _OVERGEN_EXTRA,
+                            )
+                        except Exception as og_exc:
+                            extra_gens = []
+                            logger.exception(
+                                "over-gen failed: %s", og_exc,
+                            )
+                        if len(extra_gens) >= 1:
+                            extra_scored = [
+                                self._score_rollout(g, problem)
+                                for g in extra_gens
+                            ]
+                            extra_rewards = [r for r, _ in extra_scored]
+                            extra_lens = [length for _, length in extra_scored]
+                            # Stats update with the extras so the
+                            # posterior learns from ALL honest draws,
+                            # not just the submitted subset.
+                            self._prompt_stats.record_group(
+                                prompt_idx, extra_rewards,
+                                level=level, subject=subject,
+                                checkpoint_n=state.checkpoint_n,
+                                completion_lens=extra_lens,
+                            )
+                            pool_gens = generations + extra_gens
+                            pool_rewards = rewards + extra_rewards
+                            pool_lens = completion_lens + extra_lens
+                            chosen_idxs = _find_in_zone_subset(
+                                pool_rewards, pool_lens, M_ROLLOUTS,
+                            )
+                            overgen_ms = (time.monotonic() - t_overgen) * 1000.0
+                            if chosen_idxs is not None:
+                                # Repaint the working group from the
+                                # cherry-picked subset and re-evaluate.
+                                generations = [pool_gens[i] for i in chosen_idxs]
+                                rewards = [pool_rewards[i] for i in chosen_idxs]
+                                completion_lens = [
+                                    pool_lens[i] for i in chosen_idxs
+                                ]
+                                sigma, k_solved, in_zone = _zone_status(rewards)
+                                self._metrics.record_overgen_recovery()
+                                _emit(
+                                    logging.INFO,
+                                    "[W=%d] CHRY prompt=%-4d pool=%d "
+                                    "k=%d/%d sigma=%.3f overgen=%.1fs "
+                                    "clen=%d/%d/%d -> recovered in_zone",
+                                    state.window_n, prompt_idx,
+                                    len(pool_gens), k_solved, M_ROLLOUTS,
+                                    sigma, overgen_ms / 1000.0,
+                                    min(completion_lens),
+                                    sorted(completion_lens)[
+                                        len(completion_lens) // 2
+                                    ],
+                                    max(completion_lens),
+                                )
+                            else:
+                                _emit(
+                                    logging.INFO,
+                                    "[W=%d] CHRY prompt=%-4d pool=%d "
+                                    "k_pool=%d/%d overgen=%.1fs -> no "
+                                    "in_zone subset",
+                                    state.window_n, prompt_idx,
+                                    len(pool_gens),
+                                    sum(
+                                        1 for r in pool_rewards
+                                        if r >= _SOLVED_THRESHOLD
+                                    ),
+                                    len(pool_rewards),
+                                    overgen_ms / 1000.0,
+                                )
 
                 # Local OUT_OF_ZONE short-circuit.
                 if not in_zone:
@@ -1745,6 +2155,7 @@ class MiningEngine:
                     logger.exception("proof construction traceback:")
                     continue
                 proof_ms = (time.monotonic() - t_proof) * 1000.0
+                self._metrics.record_proof_latency(proof_ms)
                 logger.debug(
                     "[W=%d] proof done prompt=%d proof_ms=%.0f mode=%s",
                     state.window_n, prompt_idx, proof_ms,
