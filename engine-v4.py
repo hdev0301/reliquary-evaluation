@@ -334,6 +334,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import random as _random
 
@@ -637,6 +638,33 @@ def _short_subject(subject: str, max_len: int = 12) -> str:
         return "-"
     s = subject.strip()
     return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+def _fmt_submit_per_validator(
+    per_url: dict[str, tuple[object | None, float, BaseException | None]],
+) -> str:
+    """One token per validator: host, accept/reject reason, http ms, or NET_ERR."""
+    parts: list[str] = []
+    for url in sorted(per_url.keys()):
+        resp, http_ms, exc = per_url[url]
+        host = urlparse(url).netloc or url[:56]
+        if exc is not None:
+            parts.append(f"{host}:NET_ERR({type(exc).__name__})")
+            continue
+        if resp is None:
+            parts.append(f"{host}:NO_RESPONSE")
+            continue
+        r_reason = getattr(resp, "reason", None)
+        rs = (
+            r_reason.value
+            if r_reason is not None and hasattr(r_reason, "value")
+            else str(r_reason)
+        )
+        acc = bool(getattr(resp, "accepted", False))
+        parts.append(
+            f"{host}:{'accepted' if acc else 'rejected'}={rs}:{http_ms:.0f}ms"
+        )
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -972,14 +1000,20 @@ def _find_in_zone_subset(
 class _MinerMetrics:
     """Rolling counters surfaced to logs.
 
-    Reports the picker's quality (in_zone_rate), the validator's
-    accept rate, dominant reject reason, cohort warmup, and the
-    batched-proof health channel (if it had to fall back, the operator
-    needs to see it immediately).
+    Reports the picker's quality (in_zone_rate), submit outcomes,
+    dominant reject reason, cohort warmup, and the batched-proof health
+    channel (if it had to fall back, the operator needs to see it
+    immediately).
+
+    Production validators enqueue ``/submit`` and return ``reason=submitted``
+    (queued for async GRAIL). That increments ``queued_provisional``, not
+    ``validated_accepted``. Only ``reason=accepted`` reflects the inline
+    verification path (tests / sync servers).
     """
 
     submitted: int = 0
-    accepted: int = 0
+    queued_provisional: int = 0
+    validated_accepted: int = 0
     rejected: int = 0
     network_errors: int = 0
     generated: int = 0
@@ -1018,7 +1052,13 @@ class _MinerMetrics:
     def record(self, accepted: bool, reason: str | None) -> None:
         self.submitted += 1
         if accepted:
-            self.accepted += 1
+            r = (reason or "").lower()
+            if r == "submitted":
+                self.queued_provisional += 1
+            elif r == "accepted":
+                self.validated_accepted += 1
+            else:
+                self.queued_provisional += 1
             self.batched_proof_consecutive_fails = 0
         else:
             self.rejected += 1
@@ -1080,7 +1120,16 @@ class _MinerMetrics:
         )
 
     def summary(self, stats: "_PromptStats | None" = None) -> str:
-        rate = (self.accepted / self.submitted * 100.0) if self.submitted else 0.0
+        q_pct = (
+            (self.queued_provisional / self.submitted * 100.0)
+            if self.submitted
+            else 0.0
+        )
+        v_pct = (
+            (self.validated_accepted / self.submitted * 100.0)
+            if self.submitted
+            else 0.0
+        )
         top = sorted(self.reasons.items(), key=lambda kv: -kv[1])[:4]
         top_str = ",".join(f"{r}:{c}" for r, c in top) or "-"
         warm_str = ""
@@ -1113,8 +1162,9 @@ class _MinerMetrics:
             overgen_str = ""
         return (
             f"generated={self.generated} in_zone={self.in_zone_rate:.1f}% "
-            f"submitted={self.submitted} accepted={self.accepted} "
-            f"({rate:.1f}%) rejected={self.rejected} "
+            f"submitted={self.submitted} queued={self.queued_provisional} "
+            f"({q_pct:.1f}% prov.) validated={self.validated_accepted} "
+            f"({v_pct:.1f}% post-GRAIL) rejected={self.rejected} "
             f"local_oos={self.local_out_of_zone} net_err={self.network_errors}"
             f"{warm_str}{proof_str}{http_str}{overgen_str} "
             f"k_hist=[{k_str}] top=[{top_str}]"
@@ -2524,7 +2574,7 @@ class MiningEngine:
                         "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
                         "sigma=%.3f merkle=%s proof=%s gen=%.1fs "
                         "proof=%.1fs http=%.2fs gpu=%s->%s "
-                        "open_age=%.1fs %s -> %s reason=%s",
+                        "open_age=%.1fs %s accepted=%s status=%s reason=%s",
                         ctx.window_n, ctx.prompt_idx,
                         _fmt_rewards(ctx.rewards),
                         ctx.k_solved, M_ROLLOUTS, ctx.sigma,
@@ -2532,8 +2582,23 @@ class MiningEngine:
                         ctx.gen_ms / 1000.0, ctx.proof_ms / 1000.0,
                         http_ms / 1000.0,
                         ctx.gpu_pre, gpu_post, ctx.open_age_s,
-                        multi_str, status, reason_str,
+                        multi_str, accepted, status, reason_str,
                     )
+                    _need_resp_breakdown = False
+                    if per_url:
+                        if len(per_url) > 1:
+                            _need_resp_breakdown = True
+                        else:
+                            _r0, _ms0, _e0 = next(iter(per_url.values()))
+                            if _r0 is None or _e0 is not None:
+                                _need_resp_breakdown = True
+                    if _need_resp_breakdown:
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] SUB|r prompt=%-4d per_validator %s",
+                            ctx.window_n, ctx.prompt_idx,
+                            _fmt_submit_per_validator(per_url),
+                        )
                     results.append((accepted, reason_str))
                 except asyncio.CancelledError:
                     # Task cancelled by window-roll handler — log
@@ -2648,6 +2713,17 @@ class MiningEngine:
                     )
                 except Exception:
                     logger.exception("checkpoint pull failed; keeping local")
+
+                # When local generation matches the validator gate but we never
+                # persisted a revision string (e.g. cold start), mirror remote so
+                # BatchSubmissionRequest.checkpoint_hash cannot be empty while
+                # the gate expects WRONG_CHECKPOINT checks.
+                if (
+                    local_n == state.checkpoint_n
+                    and not local_hash
+                    and state.checkpoint_revision
+                ):
+                    local_hash = state.checkpoint_revision
 
                 if state.state != WindowState.OPEN:
                     await asyncio.sleep(1)
@@ -3459,6 +3535,30 @@ class MiningEngine:
                             "(%s); firing submit anyway",
                             state.window_n, _post_probe_ms / 1000.0, e,
                         )
+
+                if local_n < state.checkpoint_n:
+                    _emit(
+                        logging.WARNING,
+                        "[W=%d] SKIP prompt=%-4d submit: local_n=%d < "
+                        "checkpoint_n=%d (would WRONG_CHECKPOINT)",
+                        state.window_n, prompt_idx, local_n,
+                        state.checkpoint_n,
+                    )
+                    continue
+                if (
+                    local_hash
+                    and state.checkpoint_revision
+                    and local_hash != state.checkpoint_revision
+                ):
+                    _emit(
+                        logging.WARNING,
+                        "[W=%d] SKIP prompt=%-4d submit: checkpoint revision "
+                        "mismatch local=%s remote=%s (would WRONG_CHECKPOINT)",
+                        state.window_n, prompt_idx,
+                        local_hash[:12],
+                        state.checkpoint_revision[:12],
+                    )
+                    continue
 
                 request = BatchSubmissionRequest(
                     miner_hotkey=self.wallet.hotkey.ss58_address,
