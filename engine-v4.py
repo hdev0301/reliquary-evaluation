@@ -377,6 +377,8 @@ def _emit(level: int, fmt: str, *args) -> None:
         and level == logging.INFO
         and " GEN " not in msg
         and " SUB  " not in msg
+        and "PREGEN" not in msg
+        and "pregen=" not in msg
     ):
         return
 
@@ -3021,6 +3023,13 @@ class MiningEngine:
         self._pregen_task = asyncio.create_task(
             self._produce_pregen(state, rng),
             name=f"pregen-w{state.window_n}",
+        )
+        _emit(
+            logging.INFO,
+            "[W=%d] PREGEN spawn (state=%s, queue=%d)",
+            state.window_n,
+            getattr(state.state, "value", str(state.state)),
+            len(self._pregen_queue),
         )
 
     async def _produce_pregen(
