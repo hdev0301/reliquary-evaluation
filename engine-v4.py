@@ -708,9 +708,11 @@ class _PregenCandidate:
 # Maximum staleness of a pregen candidate before it gets discarded. Older
 # than this and the cohort signal / cooldown set has drifted too far.
 _PREGEN_MAX_AGE_S: float = 180.0
-# Max simultaneous queued pregen candidates. 1 = first submission per
-# window benefits; subsequent ones go through the normal live pipeline.
-_PREGEN_MAX_QUEUE: int = 1
+# Max simultaneous queued pregen candidates. Bumped from 1 → 3 so that
+# multiple OPEN submissions benefit (not just the first), and so idle
+# GPU time during batch-full / WAIT phases gets converted into ready
+# candidates for the next window.
+_PREGEN_MAX_QUEUE: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -2161,6 +2163,9 @@ class MiningEngine:
                             state.valid_submissions,
                             B_BATCH,
                         )
+                    # GPU is idle while batch is sealed — convert that time
+                    # into ready pregen candidates for the next window.
+                    self._maybe_spawn_pregen(state, rng)
                     await asyncio.sleep(1.0)
                     continue
 
@@ -2208,6 +2213,9 @@ class MiningEngine:
                             _eff_budget_s, _hard_http_s,
                             _hard_proof_s, _hard_min_gen_s,
                         )
+                    # GPU is idle during WAIT — pregen for the next window
+                    # instead of letting that time go to waste.
+                    self._maybe_spawn_pregen(state, rng)
                     await asyncio.sleep(2.0)
                     continue
 
@@ -2994,7 +3002,9 @@ class MiningEngine:
 
         Discards entries that have aged out, were generated under a
         different checkpoint, or whose prompt has since entered cooldown
-        or the per-window superseded blacklist.
+        or the per-window superseded blacklist. Prefers in_zone candidates
+        so an OPEN slot isn't burned on a guaranteed-fail submission
+        when an acceptable one is sitting in the queue.
         """
         if not self._pregen_queue:
             return None
@@ -3008,6 +3018,9 @@ class MiningEngine:
         ]
         if not self._pregen_queue:
             return None
+        for i, c in enumerate(self._pregen_queue):
+            if c.in_zone:
+                return self._pregen_queue.pop(i)
         return self._pregen_queue.pop(0)
 
     def _maybe_spawn_pregen(
