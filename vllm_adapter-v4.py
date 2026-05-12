@@ -44,13 +44,11 @@ v4:
 - ``generate()`` heartbeat fires every 5 s (was 10 s) with the same
   back-off pattern. Once a generate is >30 s in, it slows to 10 s.
 - All log lines reach a flushing handler (configured by main-v4's
-  ``setup_logging``) — but as a belt-and-suspenders, every heartbeat
-  also writes a single line to ``sys.stderr`` via ``print(..., flush=True)``
-  so even if the root handler is misconfigured the operator still gets
-  output.
-- ``generate()`` adds an "elapsed_so_far" log on entry (not just begin)
-  with current GPU memory so the operator can correlate vLLM hangs with
-  KV cache pressure.
+  ``setup_logging``). Optional raw-fd duplicates: set
+  ``RELIQUARY_RAW_STDERR=1`` if logging is still invisible (same flag
+  as ``engine-v4`` ``_emit``).
+- Routine ``vllm.generate`` heartbeats and begin/done noise are at
+  DEBUG or trimmed so a normal PICK→GEN→SUB cycle stays ~3 INFO lines.
 
 All other paths (transformers shim, n=k batched sampling, padding) are
 unchanged.
@@ -110,20 +108,21 @@ except OSError:
 _DEDUPE_WINDOW_S = 0.5
 _dedupe_last: dict[str, float] = {}
 
+# Mirror ``engine-v4``: raw-fd duplicate is opt-in only.
+_RAW_STDERR_FLUSH = os.environ.get(
+    "RELIQUARY_RAW_STDERR", "",
+).strip().lower() in ("1", "true", "yes")
+
 
 def _stderr_print(msg: str) -> None:
-    """Direct write to the kernel-level stderr fd, bypassing every
-    Python-side stream wrap (sys.stderr, sys.__stderr__, any tee
-    installed by btlogging, etc.).
+    """Optional direct write to the kernel-level stderr fd.
 
-    Used by heartbeats and a few sentinel log lines so they remain
-    visible even if the logging framework is in a broken state. Routine
-    log lines go through ``logger.info`` instead.
-
-    Includes a 500 ms dedupe so an identical message can't appear
-    twice in quick succession — backstop against the duplicate-log
-    pathology if a stderr tee got installed BEFORE our os.dup ran.
+    Disabled unless ``RELIQUARY_RAW_STDERR=1`` — the root
+    ``FlushingStreamHandler`` is the normal path; duplicates were only
+    useful when btlogging clobbered handlers.
     """
+    if not _RAW_STDERR_FLUSH:
+        return
     now = time.monotonic()
     last_t = _dedupe_last.get(msg)
     if last_t is not None and (now - last_t) < _DEDUPE_WINDOW_S:
@@ -160,9 +159,9 @@ class _Heartbeat:
         heartbeat label='LLM(...) construct' tick=2 elapsed=4.0s
         ...
 
-    Two emit channels per tick:
-      - ``logger.info`` (so it lands in the operator's main log)
-      - direct ``sys.stderr`` write (so it lands even if logging is broken)
+    Two emit channels per tick (when raw flush is enabled):
+      - ``logger`` at ``tick_level`` (default INFO)
+      - optional raw fd write (``RELIQUARY_RAW_STDERR=1``)
     """
 
     def __init__(
@@ -173,12 +172,16 @@ class _Heartbeat:
         settled_interval_s: float = _HEARTBEAT_SETTLED_INTERVAL_S,
         fresh_duration_s: float = _HEARTBEAT_FRESH_DURATION_S,
         extra_fn=None,
+        tick_level: int = logging.INFO,
+        done_ok_level: int = logging.INFO,
     ) -> None:
         self.label = label
         self.fresh_interval_s = fresh_interval_s
         self.settled_interval_s = settled_interval_s
         self.fresh_duration_s = fresh_duration_s
         self.extra_fn = extra_fn  # optional () -> str for trailing context
+        self.tick_level = tick_level
+        self.done_ok_level = done_ok_level
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -204,7 +207,7 @@ class _Heartbeat:
                 f"heartbeat label='{self.label}' state=done "
                 f"elapsed={elapsed:.1f}s"
             )
-            logger.info(line)
+            logger.log(self.done_ok_level, line)
             _stderr_print(line)
         else:
             line = (
@@ -241,7 +244,7 @@ class _Heartbeat:
                 f"heartbeat label='{self.label}' tick={tick} "
                 f"elapsed={elapsed:.1f}s{extra}"
             )
-            logger.info(line)
+            logger.log(self.tick_level, line)
             _stderr_print(line)
 
 
@@ -505,7 +508,7 @@ class VLLMAdapter:
             max_tokens=int(max_new_tokens),
         )
 
-        logger.info(
+        logger.debug(
             "vllm.generate begin n=%d prompt_len=%d max_new_tokens=%d "
             "temperature=%.2f top_p=%.2f top_k=%d %s",
             n, len(prompt_tokens), max_new_tokens,
@@ -525,6 +528,8 @@ class VLLMAdapter:
                 settled_interval_s=_GENERATE_HEARTBEAT_SETTLED_INTERVAL_S,
                 fresh_duration_s=_GENERATE_HEARTBEAT_FRESH_DURATION_S,
                 extra_fn=lambda: _gpu_mem_str(gpu_id),
+                tick_level=logging.DEBUG,
+                done_ok_level=logging.DEBUG,
             ):
                 # vLLM ≥ 0.9 removed the ``prompt_token_ids=`` kwarg; pass
                 # prompt as a TokensPrompt-shaped dict. Dict form works
@@ -547,20 +552,12 @@ class VLLMAdapter:
         request_output = outputs[0]
         gen_lens = [len(c.token_ids) for c in request_output.outputs]
         finish_reasons = [c.finish_reason for c in request_output.outputs]
-        total_tokens = sum(gen_lens)
-        toks_per_sec = (
-            total_tokens / (elapsed_ms / 1000.0)
-            if elapsed_ms > 0 else 0.0
-        )
         logger.info(
-            "vllm.generate done n=%d elapsed_ms=%.0f total_tokens=%d "
-            "throughput=%.0f tok/s gen_lens=%s finish=%s %s",
-            n, elapsed_ms, total_tokens, toks_per_sec,
-            gen_lens, finish_reasons, _gpu_mem_str(self._gpu_id),
+            "vllm.generate done n=%d elapsed_ms=%.0f gen_lens=%s finish=%s",
+            n, elapsed_ms, gen_lens, finish_reasons,
         )
         _stderr_print(
-            f"[vllm_adapter] generate done n={n} elapsed_ms={elapsed_ms:.0f} "
-            f"total_tokens={total_tokens}"
+            f"[vllm_adapter] generate done n={n} elapsed_ms={elapsed_ms:.0f}"
         )
 
         rows: list[list[int]] = []

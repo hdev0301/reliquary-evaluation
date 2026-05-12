@@ -367,19 +367,14 @@ def _gpu_mem_compact(gpu_id: int) -> str:
 # Dual-emit: structured logger.info + raw stderr fallback
 # ---------------------------------------------------------------------------
 #
-# Engine-side belt-and-suspenders. When bittensor/vllm clobber the root
-# logger AFTER engine.py is imported (e.g. during a checkpoint reload
-# that rebuilds the vLLM ``LLM`` and triggers another dictConfig),
-# logger.info(...) silently goes nowhere. We additionally write the same
-# formatted string straight to ``sys.stderr`` so the operator never
-# loses sight of PICK / GEN / SUB / OOZ / SUMMARY / window-banner lines.
-#
-# The duplicate when both channels work is acceptable: the stderr path
-# has no timestamp prefix, so the timestamped logger line and the raw
-# stderr line are visually distinguishable. Set ``RELIQUARY_NO_STDERR=1``
-# to disable the stderr fallback once you've verified your deployment.
+# Engine-side optional belt-and-suspenders. When bittensor/vllm clobber
+# the root logger AFTER engine.py is imported, ``logger.info`` can go
+# nowhere. Set ``RELIQUARY_RAW_STDERR=1`` to also mirror each ``_emit``
+# line to the kernel stderr fd captured at import time.
 
-_STDERR_FALLBACK_ENABLED = os.environ.get("RELIQUARY_NO_STDERR", "") == ""
+_STDERR_FALLBACK_ENABLED = os.environ.get(
+    "RELIQUARY_RAW_STDERR", "",
+).strip().lower() in ("1", "true", "yes")
 
 # Bulletproof direct-write fd, captured at MODULE IMPORT time — i.e.
 # before bittensor / vllm / transformers had any chance to wrap or
@@ -391,8 +386,8 @@ _STDERR_FALLBACK_ENABLED = os.environ.get("RELIQUARY_NO_STDERR", "") == ""
 # points at the original kernel-level stderr — so ``os.write(_FD2,
 # ...)`` cannot be intercepted, recursed, or replayed by any Python
 # layer. This is the only Python-level technique that survives
-# arbitrary userspace stream wrapping. Set ``RELIQUARY_NO_STDERR=1``
-# to disable the direct-write fallback entirely.
+# arbitrary userspace stream wrapping. Raw duplicate is opt-in via
+# ``RELIQUARY_RAW_STDERR=1`` (see ``_STDERR_FALLBACK_ENABLED``).
 try:
     _RAW_STDERR_FD: int | None = os.dup(2)
 except OSError:
@@ -482,12 +477,11 @@ def _raw_stderr_write(line: str) -> None:
 
 
 def _emit(level: int, fmt: str, *args) -> None:
-    """Emit a structured line via logger AND a bulletproof raw-fd write.
+    """Emit a structured line via logger; optional raw-fd duplicate.
 
-    Use for operator-critical events whose visibility must survive a
-    handler clobber: per-attempt PICK/GEN/SUB/OOZ/SKIP/ERR, window
-    banners, periodic SUMMARY. Routine debug/trace logs continue using
-    plain ``logger.info`` / ``logger.debug``.
+    Use for operator-critical events: per-attempt PICK/GEN/SUB/OOZ/
+    SKIP/ERR, window banners, periodic SUMMARY. Routine debug/trace
+    logs continue using plain ``logger.info`` / ``logger.debug``.
 
     Three layers of defense against the duplicate-log pathology:
 
@@ -495,10 +489,8 @@ def _emit(level: int, fmt: str, *args) -> None:
        calls, scan pinned loggers and strip any handlers that got
        re-attached by third-party libs (bittensor/vllm) after the
        one-time reseat.
-    2. **Raw-fd direct write**: bypass Python-level stream wrapping
-       entirely — write via ``os.write(captured_fd, ...)`` where the
-       fd was duped at module import time, before any third-party
-       wrap could install itself.
+    2. **Raw-fd direct write** (opt-in ``RELIQUARY_RAW_STDERR=1``):
+       bypass Python-level stream wrapping entirely.
     3. **Dedupe filter**: drop a (logger, msg) pair that's identical
        to one emitted in the last 500 ms. Catches the rare race where
        layers 1+2 both fail.
@@ -525,7 +517,8 @@ def _emit(level: int, fmt: str, *args) -> None:
                 f"unauthorized handlers from pinned loggers"
             )
             logger.info(note)
-            _raw_stderr_write(f"[engine] {note}")
+            if _STDERR_FALLBACK_ENABLED:
+                _raw_stderr_write(f"[engine] {note}")
 
     # Layer 3: dedupe by (logger_name, msg) within 500ms.
     now = time.monotonic()

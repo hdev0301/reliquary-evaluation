@@ -338,6 +338,12 @@ def _install_root_handler(
             _lg.removeHandler(h)
         _lg.setLevel(logging.WARNING)
 
+    # Hugging Face / tqdm / filelock chatter (e.g. "Download complete: 0.00B")
+    # at INFO floods miner logs without aiding GRPO debugging.
+    for noisy_lib in ("huggingface_hub", "tqdm", "filelock"):
+        _lg = logging.getLogger(noisy_lib)
+        _lg.setLevel(logging.WARNING)
+
 
 def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
     """Install our flushing root handler + pin reliquary loggers.
