@@ -465,10 +465,12 @@ class _PromptStats:
     every entry on every checkpoint bump (could be 10k+ entries).
     """
 
-    alpha_prior: float = 1.0
-    beta_prior: float = 1.0
-
+    # NOTE: alpha_prior / beta_prior must be slots, not bare class
+    # attributes, because load_from() overwrites them per-instance and
+    # __slots__ otherwise forbids new instance attributes.
     __slots__ = (
+        "alpha_prior",
+        "beta_prior",
         "_counts",
         "_last_checkpoint",
         "_cohort_counts",
@@ -481,6 +483,8 @@ class _PromptStats:
     )
 
     def __init__(self) -> None:
+        self.alpha_prior: float = 1.0
+        self.beta_prior: float = 1.0
         self._counts: dict[int, tuple[int, int]] = {}
         self._last_checkpoint: dict[int, int] = {}
         self._cohort_counts: dict[tuple[str, str], tuple[int, int]] = {}
