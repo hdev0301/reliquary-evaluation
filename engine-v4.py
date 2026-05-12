@@ -3113,6 +3113,22 @@ class MiningEngine:
         self._metrics.record_generation(k_solved)
         self._maybe_persist_stats()
 
+        # Drop out-of-zone pregens. Empirically (W=1221 incident) consuming
+        # OOZ pregens burns OPEN slots on cherry-pick attempts that rarely
+        # recover, blocks the queue from filling with usable candidates,
+        # and prevents the live picker from running with fresh window state.
+        # The posterior still benefits — record_group() above ran regardless.
+        if not in_zone:
+            _emit(
+                logging.INFO,
+                "[W=%d] PREGEN drop prompt=%-4d cohort=(%s,%s) k=%d/%d "
+                "sigma=%.3f in_zone=False gen=%.1fs (out-of-zone — not queued)",
+                state.window_n, prompt_idx,
+                _short_level(level), _short_subject(subject),
+                k_solved, M_ROLLOUTS, sigma, gen_ms / 1000.0,
+            )
+            return
+
         candidate = _PregenCandidate(
             prompt_idx=prompt_idx,
             level=level,
@@ -3133,10 +3149,10 @@ class MiningEngine:
         _emit(
             logging.INFO,
             "[W=%d] PREGEN ready prompt=%-4d cohort=(%s,%s) k=%d/%d "
-            "sigma=%.3f in_zone=%s gen=%.1fs queue=%d",
+            "sigma=%.3f in_zone=True gen=%.1fs queue=%d",
             state.window_n, prompt_idx,
             _short_level(level), _short_subject(subject),
-            k_solved, M_ROLLOUTS, sigma, in_zone, gen_ms / 1000.0,
+            k_solved, M_ROLLOUTS, sigma, gen_ms / 1000.0,
             len(self._pregen_queue),
         )
 
