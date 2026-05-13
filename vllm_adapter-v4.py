@@ -309,6 +309,9 @@ class VLLMAdapter:
         gpu_memory_utilization: float = 0.85,
         dtype: str = "bfloat16",
         enforce_eager: bool = False,
+        kv_cache_dtype: str | None = None,
+        speculative_model: str | None = None,
+        num_speculative_tokens: int = 0,
     ) -> None:
         self._model_path = model_path
         self._gpu_id = gpu_id
@@ -316,6 +319,17 @@ class VLLMAdapter:
         self._gpu_memory_utilization = gpu_memory_utilization
         self._dtype = dtype
         self._enforce_eager = enforce_eager
+        # Tier 1: FP8 KV cache halves attention memory and lets a larger
+        # batch fit in the pre-allocated KV pool. "fp8" works on Hopper/
+        # Blackwell; "auto"/None falls back to model dtype.
+        self._kv_cache_dtype = kv_cache_dtype
+        # Tier 2: speculative decoding via a small draft model. The draft
+        # proposes `num_speculative_tokens` tokens per step; the target
+        # model verifies all of them in one forward pass. Typical
+        # speedup 1.5-2.5x on long decodes. Set both to enable; either
+        # missing disables the feature.
+        self._speculative_model = speculative_model
+        self._num_speculative_tokens = num_speculative_tokens
 
         self.device = f"cuda:{gpu_id}"
 
@@ -329,29 +343,48 @@ class VLLMAdapter:
     def _build(self, model_path: str) -> None:
         from vllm import LLM
 
+        spec_enabled = bool(
+            self._speculative_model and self._num_speculative_tokens > 0
+        )
         logger.info(
             "vLLM build start: model=%s dtype=%s max_model_len=%d "
-            "gpu_mem_util=%.2f enforce_eager=%s gpu=cuda:%d %s",
+            "gpu_mem_util=%.2f enforce_eager=%s kv_cache_dtype=%s "
+            "spec=%s gpu=cuda:%d %s",
             model_path, self._dtype, self._max_model_len,
             self._gpu_memory_utilization, self._enforce_eager,
+            self._kv_cache_dtype or "auto",
+            (
+                f"{self._speculative_model.split('/')[-1]}@k={self._num_speculative_tokens}"
+                if spec_enabled
+                else "off"
+            ),
             self._gpu_id, _gpu_mem_str(self._gpu_id),
         )
 
         gpu_id = self._gpu_id
+
+        llm_kwargs: dict[str, Any] = {
+            "model": model_path,
+            "dtype": self._dtype,
+            "gpu_memory_utilization": self._gpu_memory_utilization,
+            "max_model_len": self._max_model_len,
+            "enforce_eager": self._enforce_eager,
+            "disable_log_stats": True,
+        }
+        if self._kv_cache_dtype and self._kv_cache_dtype.lower() != "auto":
+            llm_kwargs["kv_cache_dtype"] = self._kv_cache_dtype
+        if spec_enabled:
+            llm_kwargs["speculative_model"] = self._speculative_model
+            llm_kwargs["num_speculative_tokens"] = (
+                self._num_speculative_tokens
+            )
 
         with _Heartbeat(
             f"LLM(...) construct model={model_path.split('/')[-1]} "
             f"gpu=cuda:{gpu_id}",
             extra_fn=lambda: _gpu_mem_str(gpu_id),
         ):
-            self._llm = LLM(
-                model=model_path,
-                dtype=self._dtype,
-                gpu_memory_utilization=self._gpu_memory_utilization,
-                max_model_len=self._max_model_len,
-                enforce_eager=self._enforce_eager,
-                disable_log_stats=True,
-            )
+            self._llm = LLM(**llm_kwargs)
 
         self._model_path = model_path
         logger.info(

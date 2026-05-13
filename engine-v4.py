@@ -196,6 +196,16 @@ _SHORT_COMPLETION_PENALTY: float = 0.10
 _LONG_COMPLETION_THRESHOLD_TOKENS: int = 5600
 _LONG_COMPLETION_PENALTY: float = 1.0
 
+# Tier 3 (2026-05-13): soft max-length cap. The protocol allows up to
+# MAX_NEW_TOKENS_PROTOCOL_CAP (8192), and the validator accepts max-length
+# termination. But the slowest rollout in a batched gen dictates wall-
+# clock — capping at ~6000 saves ~25% gen time at the cost of missing
+# answers boxed past token 6000 (rare for Qwen3-4B on MATH). Env var
+# override so operators can A/B without code change. 0 = disabled.
+_SOFT_MAX_NEW_TOKENS_CAP: int = int(
+    os.environ.get("RELIQUARY_SOFT_MAX_NEW_TOKENS", "6000") or 0
+)
+
 # Time-budget-aware picker penalties: estimate
 # expected_pipeline_s = open_age + gen + proof + http and penalize
 # prompts whose expected finish crosses the OPEN deadline.
@@ -3532,6 +3542,14 @@ class MiningEngine:
         # us in_zone hits whenever the model would have boxed the answer
         # past the shortened cap. Leaving the helper in place for future
         # diagnostics; just not consuming it here.
+
+        # Tier 3 soft cap: bound the slowest rollout's wall-clock without
+        # sacrificing the max-length strategy entirely. 6000 is the
+        # default — past the 95th percentile of boxed-answer positions
+        # observed on Qwen3-4B + MATH. Override with the
+        # RELIQUARY_SOFT_MAX_NEW_TOKENS env var; set to 0 to disable.
+        if _SOFT_MAX_NEW_TOKENS_CAP > 0:
+            effective_max_new = min(effective_max_new, _SOFT_MAX_NEW_TOKENS_CAP)
 
         with torch.no_grad():
             device_str = getattr(self.vllm_model, "device", "cpu")

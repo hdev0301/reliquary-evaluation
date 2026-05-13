@@ -481,6 +481,9 @@ def _build_vllm_adapter(
     max_model_len: int,
     gpu_memory_utilization: float,
     enforce_eager: bool,
+    kv_cache_dtype: str | None = None,
+    speculative_model: str | None = None,
+    num_speculative_tokens: int = 0,
 ):
     """Construct VLLMAdapter (the ~30-60s blocking vLLM init).
 
@@ -497,6 +500,9 @@ def _build_vllm_adapter(
             max_model_len=max_model_len,
             gpu_memory_utilization=gpu_memory_utilization,
             enforce_eager=enforce_eager,
+            kv_cache_dtype=kv_cache_dtype,
+            speculative_model=speculative_model,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
 
@@ -648,6 +654,41 @@ def mine(
         "--enforce-eager",
         help="Disable vLLM CUDA graphs (slower but lower memory).",
     ),
+    kv_cache_dtype: str = typer.Option(
+        "auto",
+        help=(
+            "vLLM KV cache dtype. 'auto' = match model dtype. 'fp8' "
+            "halves KV memory (Hopper/Blackwell only) so larger batches "
+            "fit in the preallocated pool — typically 10-15%% gen "
+            "throughput gain. Set to 'auto' if you see numerical "
+            "regressions in GRAIL sketches."
+        ),
+    ),
+    attention_backend: str = typer.Option(
+        "",
+        help=(
+            "Override vLLM attention backend by setting VLLM_ATTENTION_BACKEND. "
+            "On Blackwell (B200) 'FLASHINFER' is typically 10-20%% faster "
+            "than default. Leave empty to let vLLM auto-select."
+        ),
+    ),
+    speculative_model: str = typer.Option(
+        "",
+        help=(
+            "HF repo id of a small draft model for speculative decoding "
+            "(e.g. 'Qwen/Qwen2.5-0.5B'). Must share the target model's "
+            "tokenizer. Typical 1.5-2.5x decode speedup on long completions. "
+            "Empty = disabled."
+        ),
+    ),
+    num_speculative_tokens: int = typer.Option(
+        5,
+        help=(
+            "Speculative tokens proposed per step. Higher = more parallelism "
+            "but more wasted work when draft mispredicts. 5 is a good default. "
+            "Ignored if --speculative-model is empty."
+        ),
+    ),
     stats_path: str = typer.Option(
         ".reliquary_miner_stats.json",
         help=(
@@ -680,6 +721,17 @@ def mine(
 
     os.environ["BT_NETWORK"] = network
     os.environ["NETUID"] = str(netuid)
+
+    # Tier 1: optional attention backend override. MUST be set before
+    # any transitive vLLM import — that's why we touch it here, before
+    # _run() is even constructed.
+    if attention_backend:
+        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+        logger.info(
+            "VLLM_ATTENTION_BACKEND=%s (override). On B200, FLASHINFER "
+            "typically yields 10-20%% faster decode.",
+            attention_backend,
+        )
 
     logger.info(
         "Starting Reliquary miner (network=%s, netuid=%d, env=%s, backend=%s)",
@@ -821,6 +873,8 @@ def mine(
                     _build_vllm_adapter,
                     initial_path, vllm_gpu, max_model_len,
                     gpu_memory_utilization, enforce_eager,
+                    kv_cache_dtype, speculative_model or None,
+                    num_speculative_tokens,
                 )
                 logger.info("vllm adapter ready — synchronizing GPU before HF proof model load")
                 await asyncio.to_thread(_gpu_sync_and_clear, vllm_gpu)
@@ -840,6 +894,8 @@ def mine(
                     _build_vllm_adapter,
                     initial_path, vllm_gpu, max_model_len,
                     gpu_memory_utilization, enforce_eager,
+                    kv_cache_dtype, speculative_model or None,
+                    num_speculative_tokens,
                 )
                 hf_task = asyncio.to_thread(
                     _build_hf_proof_model,
