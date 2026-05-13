@@ -72,11 +72,38 @@ _STATE_POLL_BACKOFF_S: float = 3.0
 _MIN_GEN_HARD_GATE_S: float = 4.0
 _MIN_GEN_HARD_GATE_PREGEN_S: float = 1.5
 
-# Faster idle polls than 1s defaults — reduces latency to detect OPEN /
-# next window vs competitors on the same validator.
-_IDLE_POLL_NON_OPEN_S: float = 0.5
-_IDLE_POLL_BATCH_FULL_S: float = 0.35
+# Tiered idle-poll cadence: how often we GET /state while waiting for the
+# next OPEN. Tighter polling cuts the OPEN-detection latency that delays
+# the first SUB of the new window — the dominant lever once pregen is
+# warm. We don't burst-poll constantly (it would hammer every validator
+# in the broadcast set); instead, the engine predicts the next OPEN from
+# observed inter-window cadence and tightens only when close.
+#
+# Tier breakdown (see _idle_poll_interval_s):
+#   - DEFAULT (no prediction or > 10s away): 0.1s
+#   - NEAR (2-10s before predicted OPEN): 0.1s (kept same as default for
+#     simplicity — bump if you see late detection)
+#   - BURST (< 2s away or past predicted): 0.05s
+_IDLE_POLL_DEFAULT_S: float = 0.10
+_IDLE_POLL_NEAR_S: float = 0.10
+_IDLE_POLL_BURST_S: float = 0.05
+# Legacy aliases — kept for any inline references; same value as DEFAULT.
+_IDLE_POLL_NON_OPEN_S: float = _IDLE_POLL_DEFAULT_S
+_IDLE_POLL_BATCH_FULL_S: float = _IDLE_POLL_DEFAULT_S
 _WAIT_SPIN_S: float = 1.0
+
+# Burst-mode trigger threshold: if predicted-time-to-next-OPEN is below
+# this, we drop to _IDLE_POLL_BURST_S. 2s comfortably covers chain block
+# jitter (BLOCK_TIME_SECONDS is ~12s for finney; one block of slack).
+_BURST_POLL_WHEN_TTN_BELOW_S: float = 2.0
+_NEAR_POLL_WHEN_TTN_BELOW_S: float = 10.0
+
+# Inter-window cadence: we observe the wall-clock between successive
+# OPEN detections and use the median to predict the next one. Bounded
+# (60s < cadence < 600s) to reject restart artefacts.
+_INTER_OPEN_HISTORY: int = 10
+_INTER_OPEN_MIN_S: float = 60.0
+_INTER_OPEN_MAX_S: float = 600.0
 
 # Skip redundant GET /state after proof when pre-proof probe is fresh —
 # saves one RTT on the critical path (~50–400ms in practice).
@@ -1843,6 +1870,14 @@ class MiningEngine:
             collections.deque(maxlen=_OBSERVED_OPEN_HISTORY)
         )
 
+        # Inter-window cadence tracker — wall-clock between successive
+        # OPEN detections, used by _idle_poll_interval_s() to predict the
+        # next OPEN moment and burst-poll just before it fires.
+        self._last_open_detected_at: float | None = None
+        self._inter_open_cadence_s: collections.deque[float] = (
+            collections.deque(maxlen=_INTER_OPEN_HISTORY)
+        )
+
         # Per-window OOZ-cohort blacklist — reset at every window-roll boundary.
         self._ooz_cohorts_in_window: set[tuple[str, str]] = set()
 
@@ -2364,7 +2399,7 @@ class MiningEngine:
                     # Idle phase — pre-generate a candidate so the next
                     # OPEN can skip live PICK+GEN and submit ~30s sooner.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(_IDLE_POLL_NON_OPEN_S)
+                    await asyncio.sleep(self._idle_poll_interval_s())
                     continue
 
                 if last_window_n != state.window_n:
@@ -2402,7 +2437,9 @@ class MiningEngine:
                             len(state.cooldown_prompts), state.checkpoint_n,
                         )
                     last_window_n = state.window_n
-                    self._window_open_seen_at = time.monotonic()
+                    _now_t = time.monotonic()
+                    self._record_inter_open_cadence(_now_t)
+                    self._window_open_seen_at = _now_t
                     self._superseded_in_window = set()
                     self._ooz_cohorts_in_window = set()
                     self._own_subs_in_window = 0
@@ -2439,7 +2476,7 @@ class MiningEngine:
                     # GPU is idle while batch is sealed — convert that time
                     # into ready pregen candidates for the next window.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(_IDLE_POLL_BATCH_FULL_S)
+                    await asyncio.sleep(self._idle_poll_interval_s())
                     continue
 
                 # Own-SUB pregen-mode switch: once we've landed our share
@@ -2462,7 +2499,7 @@ class MiningEngine:
                             _OWN_SUB_PREGEN_THRESHOLD, state.window_n + 1,
                         )
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(_IDLE_POLL_BATCH_FULL_S)
+                    await asyncio.sleep(self._idle_poll_interval_s())
                     continue
 
                 # Hard pre-pick deadline gate: if even the cheapest possible
@@ -2514,9 +2551,11 @@ class MiningEngine:
                             _hard_proof_s, _hard_min_gen_s,
                         )
                     # GPU is idle during WAIT — pregen for the next window
-                    # instead of letting that time go to waste.
+                    # instead of letting that time go to waste. Use the
+                    # tiered idle poll so we burst-detect the next OPEN
+                    # if we're close to it.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(_WAIT_SPIN_S)
+                    await asyncio.sleep(self._idle_poll_interval_s())
                     continue
 
                 cooldown_set = set(state.cooldown_prompts)
@@ -3240,6 +3279,56 @@ class MiningEngine:
             return
         clamped = min(duration_s, float(_OPEN_PHASE_BUDGET_S))
         self._observed_open_durations_s.append(clamped)
+
+    def _record_inter_open_cadence(self, now_t: float) -> None:
+        """Record the wall-clock gap between successive OPEN detections.
+
+        Called at every window-roll. Bounded by [_INTER_OPEN_MIN_S,
+        _INTER_OPEN_MAX_S] to reject startup jitter. The median of this
+        deque drives ``_predicted_seconds_to_next_open()``.
+        """
+        if self._last_open_detected_at is not None:
+            gap = now_t - self._last_open_detected_at
+            if _INTER_OPEN_MIN_S < gap < _INTER_OPEN_MAX_S:
+                self._inter_open_cadence_s.append(gap)
+        self._last_open_detected_at = now_t
+
+    def _predicted_seconds_to_next_open(self) -> float | None:
+        """Estimate seconds remaining until the next OPEN fires.
+
+        Returns None when there's no cadence history yet (cold start),
+        which causes _idle_poll_interval_s() to fall back to DEFAULT
+        tier. Negative return = we're past predicted OPEN (validator is
+        running slow); caller treats this as BURST.
+        """
+        if self._last_open_detected_at is None:
+            return None
+        if not self._inter_open_cadence_s:
+            return None
+        # Median is robust to outliers (occasional restart-driven gaps).
+        sorted_c = sorted(self._inter_open_cadence_s)
+        median_cadence = sorted_c[len(sorted_c) // 2]
+        elapsed = time.monotonic() - self._last_open_detected_at
+        return median_cadence - elapsed
+
+    def _idle_poll_interval_s(self) -> float:
+        """Tiered idle-poll cadence based on time-to-next-OPEN prediction.
+
+        Returns the sleep duration to use in the idle/non-OPEN poll
+        loop. Burst tier (50ms) fires inside the last 2 s before
+        predicted OPEN OR when validator is running past predicted —
+        both cases where every 100ms of detection latency translates
+        directly to higher open_age on our first SUB.
+        """
+        ttn = self._predicted_seconds_to_next_open()
+        if ttn is None:
+            return _IDLE_POLL_DEFAULT_S
+        # Past predicted, or about to fire: burst-poll.
+        if ttn < _BURST_POLL_WHEN_TTN_BELOW_S:
+            return _IDLE_POLL_BURST_S
+        if ttn < _NEAR_POLL_WHEN_TTN_BELOW_S:
+            return _IDLE_POLL_NEAR_S
+        return _IDLE_POLL_DEFAULT_S
 
     def _effective_open_budget_s(self) -> float:
         """Realistic OPEN budget for the picker.
