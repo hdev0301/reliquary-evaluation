@@ -765,6 +765,13 @@ _SATURATION_PENALTY_MED: float = 0.30   # 50-80% saturated → heavy discount
 _SATURATION_THRESHOLD_HIGH: float = 0.80
 _SATURATION_THRESHOLD_MED: float = 0.50
 
+# Own-SUB pregen-mode threshold: once we've landed N successful submits
+# in the current window, redirect GPU from live gen to pregen for the
+# NEXT window. Fixes the "validator says submit too late" FIFO problem
+# by building a warm queue so the next window's first SUB lands fast.
+# Validators typically accept 1 SUB per miner per window, so 1 = correct.
+_OWN_SUB_PREGEN_THRESHOLD: int = 1
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint pull
@@ -1714,6 +1721,11 @@ class MiningEngine:
         # Per-window OOZ-cohort blacklist — reset at every window-roll boundary.
         self._ooz_cohorts_in_window: set[tuple[str, str]] = set()
 
+        # Own successful submission counter for the current window —
+        # incremented in _drain_submit, reset on window-roll. Drives the
+        # "pregen-priority mode" switch once threshold is reached.
+        self._own_subs_in_window: int = 0
+
         # Pre-generation pipeline state. Producer runs during non-OPEN
         # phases; consumer pulls in OPEN phase to skip live PICK+GEN+SCORE.
         self._pregen_queue: list[_PregenCandidate] = []
@@ -2053,6 +2065,11 @@ class MiningEngine:
                             self._completion_cache.size_mb(),
                         )
 
+                    # Track our own per-window successful submissions for
+                    # the pregen-priority mode switch (FIFO race fix).
+                    if accepted and reason_str == "submitted":
+                        self._own_subs_in_window += 1
+
                     if reason_str == "superseded":
                         # Race for this slot is over — blacklist for window.
                         self._superseded_in_window.add(ctx.prompt_idx)
@@ -2275,6 +2292,7 @@ class MiningEngine:
                     self._window_open_seen_at = time.monotonic()
                     self._superseded_in_window = set()
                     self._ooz_cohorts_in_window = set()
+                    self._own_subs_in_window = 0
                     self._prompt_stats.record_cooldown_diff(
                         set(state.cooldown_prompts)
                     )
@@ -2307,6 +2325,29 @@ class MiningEngine:
                         )
                     # GPU is idle while batch is sealed — convert that time
                     # into ready pregen candidates for the next window.
+                    self._maybe_spawn_pregen(state, rng)
+                    await asyncio.sleep(_IDLE_POLL_BATCH_FULL_S)
+                    continue
+
+                # Own-SUB pregen-mode switch: once we've landed our share
+                # of submissions in this window, redirect GPU from more
+                # live-gen attempts to building a warm queue for the NEXT
+                # window. Fixes the FIFO race (`submit too late`) by
+                # ensuring next-window's first SUB has a pregen ready at
+                # OPEN start instead of paying ~32s of cold live gen.
+                if self._own_subs_in_window >= _OWN_SUB_PREGEN_THRESHOLD:
+                    if getattr(self, "_own_sub_notice_window", None) != (
+                        state.window_n
+                    ):
+                        self._own_sub_notice_window = state.window_n
+                        _emit(
+                            logging.INFO,
+                            "[W=%d] PREGEN-MODE own_subs=%d/%d — switching "
+                            "to pregen-priority for rest of window "
+                            "(building queue for W=%d)",
+                            state.window_n, self._own_subs_in_window,
+                            _OWN_SUB_PREGEN_THRESHOLD, state.window_n + 1,
+                        )
                     self._maybe_spawn_pregen(state, rng)
                     await asyncio.sleep(_IDLE_POLL_BATCH_FULL_S)
                     continue
