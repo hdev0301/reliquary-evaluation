@@ -632,10 +632,11 @@ def mine(
         1, help="GPU index for HF GRAIL proofs (default: 1)."
     ),
     gpu_memory_utilization: float = typer.Option(
-        0.85,
+        0.78,
         help=(
-            "vLLM gpu_memory_utilization (default: 0.85). Lower to ~0.55 "
-            "when vLLM and proof model share one GPU."
+            "vLLM gpu_memory_utilization (default: 0.78). NVML may still "
+            "show >90% used — that is often normal. Lower to ~0.55 when "
+            "vLLM and proof share one GPU or on CUDA OOM."
         ),
     ),
     max_model_len: int = typer.Option(

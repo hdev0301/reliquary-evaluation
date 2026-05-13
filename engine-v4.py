@@ -309,6 +309,25 @@ def _gpu_mem_compact(gpu_id: int) -> str:
         return "err"
 
 
+def _nvml_mem_fraction_used(gpu_id: int) -> float | None:
+    """Return used/total in [0,1] or None if NVML can't read the GPU."""
+    if not _ensure_nvml():
+        return None
+    try:
+        import pynvml  # type: ignore
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return info.used / float(info.total)
+    except Exception:
+        return None
+
+
+# Log occasionally when vLLM GPU is nearly full — high NVML % is often
+# normal (reserved pools), but sustained pressure correlates with OOM/slowdown.
+_VRAM_PRESSURE_WARN_FRAC: float = 0.92
+_VRAM_PRESSURE_WARN_EVERY: int = 12
+
+
 # ---------------------------------------------------------------------------
 # Dual-emit: structured logger.info + optional raw stderr fallback
 # ---------------------------------------------------------------------------
@@ -1699,6 +1718,37 @@ class MiningEngine:
         # phases; consumer pulls in OPEN phase to skip live PICK+GEN+SCORE.
         self._pregen_queue: list[_PregenCandidate] = []
         self._pregen_task: asyncio.Task | None = None
+        self._vram_pressure_submit_ctr: int = 0
+
+    def _maybe_warn_vram_pressure(self) -> None:
+        """Throttled hint when NVML reports very high utilization on vLLM GPU."""
+        frac = _nvml_mem_fraction_used(self.vllm_gpu)
+        if frac is None or frac < _VRAM_PRESSURE_WARN_FRAC:
+            self._vram_pressure_submit_ctr = 0
+            return
+        self._vram_pressure_submit_ctr += 1
+        h = self._vram_pressure_submit_ctr
+        if h != 1 and (h - 1) % _VRAM_PRESSURE_WARN_EVERY != 0:
+            return
+        extra = ""
+        if self.proof_gpu == self.vllm_gpu:
+            extra = (
+                " Same GPU for vLLM+proof: use lower --gpu-memory-utilization "
+                "(~0.55-0.68) or --enforce-eager."
+            )
+        else:
+            extra = (
+                " If you see OOM or stalls, lower --gpu-memory-utilization "
+                "(e.g. 0.72) or pass --enforce-eager."
+            )
+        _emit(
+            logging.WARNING,
+            "[engine.v4] VRAM %.0f%% on vllm gpu=%d — vLLM often sits >90%% "
+            "by design; watch for CUDA OOM.%s",
+            frac * 100.0,
+            self.vllm_gpu,
+            extra,
+        )
 
     def _resolve_eos_ids(self) -> set[int]:
         """Collect every token ID the model treats as a stop token, from
@@ -2065,6 +2115,7 @@ class MiningEngine:
                             ctx.window_n, ctx.prompt_idx,
                             _fmt_submit_per_validator(per_url),
                         )
+                    self._maybe_warn_vram_pressure()
                     results.append((accepted, reason_str))
                 except asyncio.CancelledError:
                     _emit(

@@ -276,9 +276,11 @@ def _parse_args() -> argparse.Namespace:
                    help="GPU index for vLLM generation (default: 0)")
     p.add_argument("--proof-gpu", type=int, default=1,
                    help="GPU index for HF GRAIL proofs (default: 1)")
-    p.add_argument("--gpu-memory-utilization", type=float, default=0.85,
-                   help="vLLM gpu_memory_utilization (default: 0.85). Lower "
-                        "to ~0.55 if vLLM and proof model share one GPU.")
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.78,
+                   help="vLLM gpu_memory_utilization (default: 0.78). vLLM "
+                        "often shows >90%% VRAM in NVML even when healthy; "
+                        "raise up to ~0.85 for throughput or lower to ~0.55 "
+                        "if vLLM and proof share one GPU or you hit OOM.")
     p.add_argument("--max-model-len", type=int, default=8192,
                    help="vLLM max_model_len (default: 8192 = MAX_NEW_TOKENS_PROTOCOL_CAP)")
     p.add_argument("--enforce-eager", action="store_true",
