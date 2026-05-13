@@ -827,15 +827,20 @@ class _PregenCandidate:
 
 # Maximum staleness of a pregen candidate before it gets discarded.
 #
-# 360s (was 180): empirically, window cadence is ~310s (validator
-# CADENCE_MS) so a pregen produced mid-window-N is ~150-300s old by the
-# time window N+1's OPEN actually fires. At 180s the late-window
-# pregens consistently aged out before consumption — wasting the 24-28s
-# of GPU we spent producing them. The cohort/cooldown-drift concern is
-# already handled by the per-consume checks (cooldown_set, checkpoint_n,
-# superseded_in_window). Underlying prompt content doesn't change, so a
-# 6-minute-old rollout is still mathematically valid.
-_PREGEN_MAX_AGE_S: float = 360.0
+# 1800s (was 360): empirically observed window cadence varies wildly —
+# from ~30s (validator drains batch fast) to ~21min (validator stalls
+# in TRAINING/PUBLISHING under load). 360s only covered the median
+# (~310s) case; in the worst case we'd wait 21min for the next OPEN,
+# then the queue of 3 in-zone pregens all aged out, and we paid full
+# live gen on a saturated prompt instead.
+#
+# 1800s (30 min) covers nearly every observed cadence. The age limit
+# isn't load-bearing for correctness — checkpoint, cooldown, and
+# superseded checks all re-run at consume time. The rollouts themselves
+# (tokens + rewards) are immutable for a given (prompt, checkpoint)
+# pair, so a 30-min-old in-zone candidate is mathematically identical
+# to a fresh one (the validator can't tell them apart).
+_PREGEN_MAX_AGE_S: float = 1800.0
 # Max simultaneous queued pregen candidates. Bumped from 1 → 3 so that
 # multiple OPEN submissions benefit (not just the first), and so idle
 # GPU time during batch-full / WAIT phases gets converted into ready
