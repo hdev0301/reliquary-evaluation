@@ -55,8 +55,30 @@ _OBSERVED_OPEN_SAFETY_FACTOR: float = 0.85
 _OBSERVED_OPEN_MIN_FLOOR_S: float = 75.0
 
 # Per-request /state timeout — overrides the client read timeout so a
-# wedged poll can't burn the OPEN window.
-_STATE_PROBE_TIMEOUT_S: float = 5.0
+# wedged poll can't burn the OPEN window. Keep this tight for latency:
+# competitors poll the same endpoint; faster probes → fresher window_n.
+_STATE_PROBE_TIMEOUT_S: float = 3.0
+
+# After /state transport failures we backoff briefly — still far below
+# POLL_INTERVAL_SECONDS (10s in reliquary.constants) so we reconnect fast.
+_STATE_POLL_BACKOFF_S: float = 3.0
+
+# Hard pre-pick deadline uses a floor on assumed gen time. When pregen has
+# queued in-zone candidates, consumption skips full generation (~30–40s),
+# so assume a much smaller residual pipeline.
+_MIN_GEN_HARD_GATE_S: float = 4.0
+_MIN_GEN_HARD_GATE_PREGEN_S: float = 1.5
+
+# Faster idle polls than 1s defaults — reduces latency to detect OPEN /
+# next window vs competitors on the same validator.
+_IDLE_POLL_NON_OPEN_S: float = 0.5
+_IDLE_POLL_BATCH_FULL_S: float = 0.35
+_WAIT_SPIN_S: float = 1.0
+
+# Skip redundant GET /state after proof when pre-proof probe is fresh —
+# saves one RTT on the critical path (~50–400ms in practice).
+_SKIP_POST_CHECK_MAX_WALL_S: float = 14.0
+_SKIP_POST_CHECK_MAX_PROOF_S: float = 12.0
 from reliquary.infrastructure import chain
 from reliquary.protocol.submission import (
     BatchSubmissionRequest,
@@ -1778,7 +1800,6 @@ class MiningEngine:
         import httpx
         import random
 
-        from reliquary.constants import POLL_INTERVAL_SECONDS
         from reliquary.miner.submitter import (
             SubmissionError, discover_validator_url,
             get_window_state_v2, submit_batch_v2,
@@ -1866,7 +1887,9 @@ class MiningEngine:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(
                 connect=5.0,
-                read=max(15.0, _http_to_s * 0.5),
+                # Response after upload is tiny (SUBMITTED JSON); keep read
+                # bounded so a hung socket fails faster than competitors wait.
+                read=max(12.0, _http_to_s * 0.45),
                 write=_http_to_s,
                 pool=5.0,
             ),
@@ -1990,6 +2013,13 @@ class MiningEngine:
                         if accepted and reason_str == "submitted"
                         else ("ACCEPTED" if accepted else "REJECTED")
                     )
+                    # Validator uvicorn path returns SUBMITTED once the HTTP body
+                    # is queued; GRAIL runs later — final accept/reject is not this line.
+                    sub_note = (
+                        "GRAIL_async"
+                        if accepted and reason_str == "submitted"
+                        else "-"
+                    )
                     n_validators = len(per_url)
                     n_accepted = sum(
                         1 for (r, _, _) in per_url.values()
@@ -2008,7 +2038,8 @@ class MiningEngine:
                         "[W=%d] SUB  prompt=%-4d rewards=%s k=%d/%d "
                         "sigma=%.3f merkle=%s proof=%s gen=%.1fs "
                         "proof=%.1fs http=%.2fs gpu=%s->%s "
-                        "open_age=%.1fs %s accepted=%s status=%s reason=%s",
+                        "open_age=%.1fs %s accepted=%s status=%s reason=%s "
+                        "note=%s",
                         ctx.window_n, ctx.prompt_idx,
                         _fmt_rewards(ctx.rewards),
                         ctx.k_solved, M_ROLLOUTS, ctx.sigma,
@@ -2017,6 +2048,7 @@ class MiningEngine:
                         http_ms / 1000.0,
                         ctx.gpu_pre, gpu_post, ctx.open_age_s,
                         multi_str, accepted, status, reason_str,
+                        sub_note,
                     )
                     _need_resp_breakdown = False
                     if per_url:
@@ -2072,11 +2104,11 @@ class MiningEngine:
                         timeout=_STATE_PROBE_TIMEOUT_S,
                     )
                 except SubmissionError:
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    await asyncio.sleep(_STATE_POLL_BACKOFF_S)
                     continue
                 except Exception as e:
                     logger.debug("state fetch failed: %s", e)
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    await asyncio.sleep(_STATE_POLL_BACKOFF_S)
                     continue
 
                 # Drain completed submit from prior iteration before
@@ -2151,7 +2183,7 @@ class MiningEngine:
                     # Idle phase — pre-generate a candidate so the next
                     # OPEN can skip live PICK+GEN and submit ~30s sooner.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(_IDLE_POLL_NON_OPEN_S)
                     continue
 
                 if last_window_n != state.window_n:
@@ -2205,7 +2237,7 @@ class MiningEngine:
                         "failed to derive randomness for window %d; retrying",
                         state.window_n,
                     )
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                    await asyncio.sleep(_STATE_POLL_BACKOFF_S)
                     continue
 
                 # Batch sealed — skip pick to save GPU until window rolls.
@@ -2225,7 +2257,7 @@ class MiningEngine:
                     # GPU is idle while batch is sealed — convert that time
                     # into ready pregen candidates for the next window.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(_IDLE_POLL_BATCH_FULL_S)
                     continue
 
                 # Hard pre-pick deadline gate: if even the cheapest possible
@@ -2243,7 +2275,11 @@ class MiningEngine:
                     _DEADLINE_PROOF_DEFAULT_S,
                     self._metrics.recent_proof_avg_s(),
                 )
-                _hard_min_gen_s = 5.0
+                _hard_min_gen_s = (
+                    _MIN_GEN_HARD_GATE_PREGEN_S
+                    if self._pregen_queue
+                    else _MIN_GEN_HARD_GATE_S
+                )
                 _min_pipeline_s = (
                     _hard_http_s + _hard_proof_s + _hard_min_gen_s
                 )
@@ -2275,7 +2311,7 @@ class MiningEngine:
                     # GPU is idle during WAIT — pregen for the next window
                     # instead of letting that time go to waste.
                     self._maybe_spawn_pregen(state, rng)
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(_WAIT_SPIN_S)
                     continue
 
                 cooldown_set = set(state.cooldown_prompts)
@@ -2837,13 +2873,11 @@ class MiningEngine:
                 # Post-proof /state recheck. Fast-path skip when the
                 # pre-proof check was recent AND proof was cheap — a
                 # window transition in that interval is negligible.
-                _skip_post_check_max_age_s = 8.0
-                _skip_post_check_max_proof_s = 5.0
                 _can_skip_post_check = (
                     _pre_proof_check_t is not None
                     and (time.monotonic() - _pre_proof_check_t)
-                    < _skip_post_check_max_age_s
-                    and (proof_ms / 1000.0) < _skip_post_check_max_proof_s
+                    < _SKIP_POST_CHECK_MAX_WALL_S
+                    and (proof_ms / 1000.0) < _SKIP_POST_CHECK_MAX_PROOF_S
                 )
                 if _can_skip_post_check:
                     logger.debug(
