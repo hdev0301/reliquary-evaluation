@@ -614,13 +614,13 @@ def mine(
         ),
     ),
     http_timeout_s: float = typer.Option(
-        30.0,
+        20.0,
         help=(
-            "Per-request HTTP timeout in seconds (v4.2). v3 used 60-120 s "
-            "which let one slow validator wedge the whole OPEN window; "
-            "30 s fails fast so the next attempt can fire. The validator's "
-            "/submit enqueues and returns immediately, so the timeout only "
-            "limits the body-upload phase."
+            "Per-request HTTP timeout in seconds. The validator's /submit "
+            "enqueues and returns once the body is uploaded — typical "
+            "responses land in <2 s. 20 s tolerates slow uplinks while "
+            "still failing fast on dead validators so the OPEN window "
+            "isn't wedged. (v4.2 was 30 s; v4.3 tightens to 20 s.)"
         ),
     ),
     use_vllm: bool = typer.Option(

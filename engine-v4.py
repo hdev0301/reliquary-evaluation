@@ -811,6 +811,18 @@ _SATURATION_PENALTY_MED: float = 0.30   # 50-80% saturated → heavy discount
 _SATURATION_THRESHOLD_HIGH: float = 0.80
 _SATURATION_THRESHOLD_MED: float = 0.50
 
+# Per-prompt superseded-EMA penalty: prompts that consistently lose the
+# FIFO race are hot-contested; shift draws toward same-EV less-contested
+# alternatives. Multiplicative (not zero) so the picker can still
+# pick them if nothing better is available. Signal = lifetime
+# superseded / lifetime attempts. ``MIN_OBS=5`` avoids penalizing
+# prompts we've only attempted once or twice on bad luck.
+_SUPERSEDED_MIN_OBS: int = 5
+_SUPERSEDED_PENALTY_HIGH: float = 0.30
+_SUPERSEDED_PENALTY_MED: float = 0.65
+_SUPERSEDED_THRESHOLD_HIGH: float = 0.50
+_SUPERSEDED_THRESHOLD_MED: float = 0.25
+
 # Own-SUB pregen-mode threshold: once we've landed N successful submits
 # in the current window, redirect GPU from live gen to pregen for the
 # NEXT window. Fixes the "validator says submit too late" FIFO problem
@@ -1059,6 +1071,28 @@ class _PromptStats:
         if n < min_obs:
             return None
         return s / n
+
+    def superseded_rate(self, idx: int, min_attempts: int) -> float | None:
+        """Lifetime ``superseded / attempts`` for this prompt.
+
+        ``superseded`` fires when validator's batch was already full by
+        the time our submission arrived — a pure FIFO-race loss
+        signal. High rate ⇒ hot-contested prompt; picker should prefer
+        same-EV less-contested alternatives.
+
+        ``attempts`` counts generations (not just submissions), so this
+        under-estimates the true contention rate, but the ordering
+        across prompts is preserved.
+
+        Returns None when fewer than ``min_attempts`` attempts logged.
+        """
+        _, n = self._counts.get(idx, (0, 0))
+        if n < min_attempts:
+            return None
+        sup = self._superseded_lifetime.get(idx, 0)
+        if sup == 0:
+            return 0.0
+        return min(1.0, sup / float(n))
 
     # ------------------------- updates -------------------------
 
@@ -1461,6 +1495,17 @@ def pick_prompt_idx(
                 score *= _SATURATION_PENALTY_HIGH
             elif sat_rate >= _SATURATION_THRESHOLD_MED:
                 score *= _SATURATION_PENALTY_MED
+
+        # Per-prompt superseded-EMA penalty — shift draws away from
+        # prompts where we consistently lose the FIFO race. Multiplicative
+        # (not zero) so the picker can still pick them when same-EV
+        # alternatives are scarce.
+        sup_rate = stats.superseded_rate(idx, _SUPERSEDED_MIN_OBS)
+        if sup_rate is not None:
+            if sup_rate >= _SUPERSEDED_THRESHOLD_HIGH:
+                score *= _SUPERSEDED_PENALTY_HIGH
+            elif sup_rate >= _SUPERSEDED_THRESHOLD_MED:
+                score *= _SUPERSEDED_PENALTY_MED
 
         avg_len_val = stats.avg_completion_len(idx)
         if (
@@ -3659,9 +3704,23 @@ class MiningEngine:
         commitments = self._verifier.create_commitments_batch(hidden_states, r_vec)
 
         log_probs = torch.log_softmax(logits[0].float(), dim=-1)
-        token_logprobs: list[float] = []
-        for i in range(prompt_length, len(all_tokens)):
-            token_logprobs.append(log_probs[i - 1, all_tokens[i]].item())
+        # Vectorized gather → ONE GPU→CPU sync via .tolist() instead of
+        # one .item() per completion token. On a 6000-token rollout this
+        # eliminates ~6000 individual cuda syncs (~0.5-1s) and matches
+        # the per-rollout single .item() loop bit-for-bit.
+        seq_len = len(all_tokens)
+        if seq_len > prompt_length:
+            row_idx = torch.arange(
+                prompt_length - 1, seq_len - 1,
+                device=log_probs.device,
+            )
+            col_idx = torch.tensor(
+                all_tokens[prompt_length:seq_len],
+                device=log_probs.device, dtype=torch.long,
+            )
+            token_logprobs: list[float] = log_probs[row_idx, col_idx].tolist()
+        else:
+            token_logprobs = []
 
         model_name: str = getattr(self.hf_model, "name_or_path", "unknown")
         signature = sign_commit_binding(
@@ -3777,9 +3836,24 @@ class MiningEngine:
             log_probs = torch.log_softmax(
                 logits_batch[i, :real_len].float(), dim=-1,
             )
-            token_logprobs: list[float] = []
-            for j in range(prompt_length, real_len):
-                token_logprobs.append(log_probs[j - 1, all_tokens[j]].item())
+            # Vectorized gather — see _build_grail_commit_single for
+            # rationale. ~48,000 .item() syncs across M=8 rollouts collapse
+            # to M tolist() round-trips, saving 0.5-3s of proof time on
+            # long completions.
+            if real_len > prompt_length:
+                row_idx = torch.arange(
+                    prompt_length - 1, real_len - 1,
+                    device=log_probs.device,
+                )
+                col_idx = torch.tensor(
+                    all_tokens[prompt_length:real_len],
+                    device=log_probs.device, dtype=torch.long,
+                )
+                token_logprobs: list[float] = (
+                    log_probs[row_idx, col_idx].tolist()
+                )
+            else:
+                token_logprobs = []
 
             signature = sign_commit_binding(
                 all_tokens, randomness, model_name, LAYER_INDEX,
