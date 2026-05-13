@@ -183,9 +183,15 @@ _OVERGEN_MAX_K: int = M_ROLLOUTS - 1
 _SHORT_COMPLETION_PENALTY: float = 0.10
 
 # Picker score multiplier when prompt has ever produced a rollout at the
-# long-tail band — these correlate with max-length GPU churn.
+# long-tail band. Originally 0.42 to save GPU time. Empirical finding
+# (2026-05-13 from top miner UID 186 dataset): the WINNING strategy is
+# max-length completions for nearly every rollout — the validator's
+# reward extractor finds the boxed answer regardless of where in the
+# completion it appears, and consistent max-length submissions dominate
+# the score table. 1.0 = no penalty; preserves the threshold constant
+# for diagnostics only.
 _LONG_COMPLETION_THRESHOLD_TOKENS: int = 5600
-_LONG_COMPLETION_PENALTY: float = 0.42
+_LONG_COMPLETION_PENALTY: float = 1.0
 
 # Time-budget-aware picker penalties: estimate
 # expected_pipeline_s = open_age + gen + proof + http and penalize
@@ -3459,14 +3465,15 @@ class MiningEngine:
         )
         effective_max_new = min(self.max_new_tokens, budget)
 
-        if prompt_idx is not None:
-            posterior_cap = self._prompt_stats.completion_budget(prompt_idx)
-            if posterior_cap is not None and posterior_cap < effective_max_new:
-                logger.debug(
-                    "[BUDGET] prompt=%d cap=%d (was %d) — posterior shortened",
-                    prompt_idx, posterior_cap, effective_max_new,
-                )
-                effective_max_new = posterior_cap
+        # Posterior-budget shortening disabled (2026-05-13). Empirical
+        # competitor analysis showed top miners consistently generate to
+        # the protocol max (8192 tokens) — the validator extracts the
+        # boxed answer from anywhere in the completion, and max-length
+        # rollouts dominate the score table. Shortening max_new_tokens
+        # to ~2× historical mean was a GPU-time optimization that costs
+        # us in_zone hits whenever the model would have boxed the answer
+        # past the shortened cap. Leaving the helper in place for future
+        # diagnostics; just not consuming it here.
 
         with torch.no_grad():
             device_str = getattr(self.vllm_model, "device", "cpu")
