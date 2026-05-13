@@ -32,11 +32,14 @@ import random as _random
 from reliquary.constants import (
     B_BATCH,
     BLOCK_TIME_SECONDS,
+    BOOTSTRAP_SIGMA_MIN,
+    BOOTSTRAP_WINDOWS,
     CHALLENGE_K,
     LAYER_INDEX,
     MAX_NEW_TOKENS_PROTOCOL_CAP,
     M_ROLLOUTS,
     SIGMA_MIN,
+    SUBNET_START_BLOCK,
     T_PROTO,
     TOP_K_PROTO,
     TOP_P_PROTO,
@@ -478,23 +481,44 @@ _BINOM_M: tuple[int, ...] = tuple(
 # (σ(k=1)≈0.331 < 0.43 ≤ σ(k=2)≈0.433.)
 _K_LO: int = 2
 _K_HI: int = 6
+# Bootstrap: σ ≥ BOOTSTRAP_SIGMA_MIN ⇔ k ∈ [1, M-1] for binary MATH rewards.
+_K_LO_BOOTSTRAP: int = 1
+_K_HI_BOOTSTRAP: int = M_ROLLOUTS - 1
 
 
-def _zone_probability(p: float) -> float:
-    """``P(K_LO ≤ Binomial(M_ROLLOUTS, p) ≤ K_HI)``.
+def _is_bootstrap_window(window_n: int) -> bool:
+    """Match ``reliquary.validator.service.is_bootstrap_window``."""
+    if window_n < SUBNET_START_BLOCK:
+        return False
+    return window_n - SUBNET_START_BLOCK < BOOTSTRAP_WINDOWS
 
-    The probability a group of M_ROLLOUTS rollouts at per-rollout solve
-    probability ``p`` will pass the validator's σ ≥ SIGMA_MIN gate.
+
+def _zone_k_bounds(*, bootstrap: bool) -> tuple[int, int]:
+    if bootstrap:
+        return _K_LO_BOOTSTRAP, _K_HI_BOOTSTRAP
+    return _K_LO, _K_HI
+
+
+def _zone_probability(p: float, *, bootstrap: bool = False) -> float:
+    """``P(k_lo ≤ Binomial(M_ROLLOUTS, p) ≤ k_hi)`` for validator zone gate.
+
+    Steady: k ∈ [2, 6] ⇔ σ ≥ SIGMA_MIN for binary rewards.
+    Bootstrap: k ∈ [1, 7] ⇔ σ ≥ BOOTSTRAP_SIGMA_MIN.
     """
     p = max(0.0, min(1.0, p))
     q = 1.0 - p
+    k_lo, k_hi = _zone_k_bounds(bootstrap=bootstrap)
     total = 0.0
-    for k in range(_K_LO, min(_K_HI, M_ROLLOUTS) + 1):
+    for k in range(k_lo, min(k_hi, M_ROLLOUTS) + 1):
         total += _BINOM_M[k] * (p ** k) * (q ** (M_ROLLOUTS - k))
     return total
 
 
-def _zone_status(rewards: list[float]) -> tuple[float, int, bool]:
+def _zone_status(
+    rewards: list[float],
+    *,
+    bootstrap: bool = False,
+) -> tuple[float, int, bool]:
     """Replicate the validator's ``rewards_std`` + ``is_in_zone`` checks.
 
     Returns ``(sigma, k_solved, in_zone)``. ``k_solved`` counts rewards
@@ -508,13 +532,18 @@ def _zone_status(rewards: list[float]) -> tuple[float, int, bool]:
     variance = sum((r - mean) ** 2 for r in rewards) / n
     sigma = variance ** 0.5
     k_solved = sum(1 for r in rewards if r >= _SOLVED_THRESHOLD)
-    return sigma, k_solved, sigma >= SIGMA_MIN
+    if sigma < 1e-8:
+        return sigma, k_solved, False
+    thr = BOOTSTRAP_SIGMA_MIN if bootstrap else SIGMA_MIN
+    return sigma, k_solved, sigma >= thr
 
 
 def _find_in_zone_subset(
     pool_rewards: list[float],
     pool_lens: list[int],
     target_size: int = M_ROLLOUTS,
+    *,
+    bootstrap: bool = False,
 ) -> list[int] | None:
     """Cherry-pick ``target_size`` indices so the chosen subset's reward
     stddev clears the in-zone gate. Prefers k closer to ``target_size // 2``
@@ -531,9 +560,10 @@ def _find_in_zone_subset(
     solves_idx.sort(key=lambda i: pool_lens[i])
     fails_idx.sort(key=lambda i: pool_lens[i])
 
+    k_lo, k_hi = _zone_k_bounds(bootstrap=bootstrap)
     mid_k = target_size // 2
     target_ks = sorted(
-        range(_K_LO, min(_K_HI, target_size) + 1),
+        range(k_lo, min(k_hi, target_size) + 1),
         key=lambda k: (abs(k - mid_k), k),
     )
 
@@ -1030,45 +1060,53 @@ class _PromptStats:
         level: str,
         subject: str,
         checkpoint_n: int,
+        window_n: int,
         completion_lens: list[int] | None = None,
+        for_posterior: bool = True,
     ) -> None:
         """Update per-prompt counts, the cohort cell, and length stats.
 
         Tags both prompt and cohort with current checkpoint_n so the lazy
         decay starts from "now" rather than retroactively discounting
         just-collected evidence.
+
+        ``for_posterior=False``: only update rolling length stats (used when
+        rewards are not an unbiased random M-group, e.g. after assembly
+        steps that would poison Beta / cohort-in-zone learning).
         """
         attempts = len(rewards)
         if attempts == 0:
             return
         solves = sum(1 for r in rewards if r >= _SOLVED_THRESHOLD)
+        boot = _is_bootstrap_window(window_n)
 
-        s_prev, n_prev = self._counts.get(prompt_idx, (0, 0))
-        self._counts[prompt_idx] = (s_prev + solves, n_prev + attempts)
-        self._last_checkpoint[prompt_idx] = checkpoint_n
+        if for_posterior:
+            s_prev, n_prev = self._counts.get(prompt_idx, (0, 0))
+            self._counts[prompt_idx] = (s_prev + solves, n_prev + attempts)
+            self._last_checkpoint[prompt_idx] = checkpoint_n
 
-        key = self._cohort_key(level, subject)
-        cs, cn = self._cohort_counts.get(key, (0, 0))
-        self._cohort_counts[key] = (cs + solves, cn + attempts)
-        self._cohort_last_checkpoint[key] = checkpoint_n
+            key = self._cohort_key(level, subject)
+            cs, cn = self._cohort_counts.get(key, (0, 0))
+            self._cohort_counts[key] = (cs + solves, cn + attempts)
+            self._cohort_last_checkpoint[key] = checkpoint_n
 
-        _, group_k, group_inzone = _zone_status(rewards)
-        ciz, ctot = self._cohort_inzone.get(key, (0, 0))
-        self._cohort_inzone[key] = (
-            ciz + (1 if group_inzone else 0),
-            ctot + 1,
-        )
-
-        # Per-prompt saturation count. Only tracked for full groups
-        # (len == M_ROLLOUTS) — cherry-pick / SHRT-rescue extras would
-        # bias the saturation rate downward because they're smaller M.
-        if attempts == M_ROLLOUTS:
-            sat_s, sat_n = self._k_saturated.get(prompt_idx, (0, 0))
-            is_saturated = group_k == 0 or group_k == M_ROLLOUTS
-            self._k_saturated[prompt_idx] = (
-                sat_s + (1 if is_saturated else 0),
-                sat_n + 1,
+            _, group_k, group_inzone = _zone_status(rewards, bootstrap=boot)
+            ciz, ctot = self._cohort_inzone.get(key, (0, 0))
+            self._cohort_inzone[key] = (
+                ciz + (1 if group_inzone else 0),
+                ctot + 1,
             )
+
+            # Per-prompt saturation count. Only tracked for full groups
+            # (len == M_ROLLOUTS) — cherry-pick / SHRT-rescue extras would
+            # bias the saturation rate downward because they're smaller M.
+            if attempts == M_ROLLOUTS:
+                sat_s, sat_n = self._k_saturated.get(prompt_idx, (0, 0))
+                is_saturated = group_k == 0 or group_k == M_ROLLOUTS
+                self._k_saturated[prompt_idx] = (
+                    sat_s + (1 if is_saturated else 0),
+                    sat_n + 1,
+                )
 
         self._cohort_cache[prompt_idx] = (str(level), str(subject))
 
@@ -1297,6 +1335,7 @@ def pick_prompt_idx(
     rng: _random.Random | None = None,
     stats: _PromptStats | None = None,
     current_checkpoint_n: int = 0,
+    window_n: int = 0,
     slots_filled: int = 0,
     superseded_in_window: set[int] | None = None,
     candidates: int = _CANDIDATES_DEFAULT,
@@ -1317,6 +1356,8 @@ def pick_prompt_idx(
     K shrinks as slots_filled approaches B_BATCH (race / near-cap modes).
     Hard blacklist for ``superseded_in_window``. Falls back to uniform
     random when ``stats`` is None.
+
+    ``window_n`` selects bootstrap vs steady zone prior (matches validator).
     """
     rng = rng or _random
     superseded_in_window = superseded_in_window or set()
@@ -1375,7 +1416,8 @@ def pick_prompt_idx(
             level, subject = cohort
 
         p_sampled = stats.sample_p(idx, current_checkpoint_n, level, subject, rng)
-        zone_p = _zone_probability(p_sampled)
+        _boot = _is_bootstrap_window(window_n)
+        zone_p = _zone_probability(p_sampled, bootstrap=_boot)
         arrival_z = stats.arrival_rate(idx)
         score = zone_p * (1.0 - _CONGESTION_WEIGHT * arrival_z)
 
@@ -2059,18 +2101,6 @@ class MiningEngine:
                         self._metrics.record(accepted, reason_str)
                     self._metrics.record_http_latency(http_ms)
 
-                    if accepted and reason_str == "submitted" and ctx.tokens:
-                        self._completion_cache.record_success(
-                            ctx.prompt_idx, ctx.checkpoint_n, ctx.tokens
-                        )
-                        logger.debug(
-                            "[W=%d] CACHE recorded prompt=%d checkpoint=%d "
-                            "tokens=%d (%.1f MB cache)",
-                            ctx.window_n, ctx.prompt_idx, ctx.checkpoint_n,
-                            len(ctx.tokens),
-                            self._completion_cache.size_mb(),
-                        )
-
                     # Track our own per-window successful submissions for
                     # the pregen-priority mode switch (FIFO race fix).
                     if accepted and reason_str == "submitted":
@@ -2475,6 +2505,7 @@ class MiningEngine:
                             self.env, cooldown_set,
                             rng=rng, stats=self._prompt_stats,
                             current_checkpoint_n=state.checkpoint_n,
+                            window_n=state.window_n,
                             slots_filled=state.valid_submissions,
                             superseded_in_window=self._superseded_in_window,
                             open_age_s=_open_age_s,
@@ -2508,18 +2539,21 @@ class MiningEngine:
                         if getattr(self, "_window_open_seen_at", None) is not None
                         else 0.0
                     )
+                    _pick_boot = _is_bootstrap_window(state.window_n)
                     _emit(
                         logging.INFO,
                         "[W=%d] PICK prompt=%-4d cohort=(%s,%s) phat=%.2f "
                         "attempts=%d arr=%.2f zone_p=%.2f slots=%d/%d "
                         "open_age=%.1fs (min=%ds, eff_budget=%.0fs) "
-                        "ooz_blk=%d",
+                        "ooz_blk=%d bootstrap=%s",
                         state.window_n, prompt_idx,
                         _short_level(level), _short_subject(subject),
-                        p_hat, attempts, arr, _zone_probability(p_hat),
+                        p_hat, attempts, arr,
+                        _zone_probability(p_hat, bootstrap=_pick_boot),
                         state.valid_submissions, B_BATCH,
                         open_age_s, _OPEN_PHASE_MIN_S, _eff_budget_s,
                         len(self._ooz_cohorts_in_window),
+                        _pick_boot,
                     )
                     logger.debug(
                         "[W=%d] PICK detail prompt=%d posterior=Beta(%.2f,%.2f) "
@@ -2538,32 +2572,15 @@ class MiningEngine:
                             state.window_n,
                         )
 
-                    cached_tokens = self._completion_cache.get(
-                        prompt_idx, state.checkpoint_n
+                    # GRPO requires M independent stochastic rollouts at T_PROTO.
+                    # Replaying one cached completion × M gives σ=0 → OUT_OF_ZONE.
+                    t_gen = time.monotonic()
+                    generations = await asyncio.to_thread(
+                        self._generate_n_rollouts,
+                        problem, M_ROLLOUTS,
+                        prompt_idx,
                     )
-                    if cached_tokens is not None:
-                        t_gen = time.monotonic()
-                        generations = [
-                            type("RolloutGen", (), {
-                                "tokens": cached_tokens,
-                                "commit": {},
-                            })()
-                        ] * M_ROLLOUTS
-                        gen_ms = (time.monotonic() - t_gen) * 1000.0
-                        _emit(
-                            logging.INFO,
-                            "[W=%d] CACHE prompt=%-4d HIT tokens=%d cached "
-                            "(saved ~15-35s) — using cached completion",
-                            state.window_n, prompt_idx, len(cached_tokens),
-                        )
-                    else:
-                        t_gen = time.monotonic()
-                        generations = await asyncio.to_thread(
-                            self._generate_n_rollouts,
-                            problem, M_ROLLOUTS,
-                            prompt_idx,
-                        )
-                        gen_ms = (time.monotonic() - t_gen) * 1000.0
+                    gen_ms = (time.monotonic() - t_gen) * 1000.0
 
                     if _pending_task is not None and _pending_task.done():
                         await _drain_submit(_pending_task, _pending_ctx)
@@ -2589,9 +2606,13 @@ class MiningEngine:
                         prompt_idx, rewards,
                         level=level, subject=subject,
                         checkpoint_n=state.checkpoint_n,
+                        window_n=state.window_n,
                         completion_lens=completion_lens,
                     )
-                    sigma, k_solved, in_zone = _zone_status(rewards)
+                    sigma, k_solved, in_zone = _zone_status(
+                        rewards,
+                        bootstrap=_is_bootstrap_window(state.window_n),
+                    )
                     self._metrics.record_generation(k_solved)
                     self._maybe_persist_stats()
                     _emit(
@@ -2699,6 +2720,7 @@ class MiningEngine:
                                 prompt_idx, extra_rewards,
                                 level=level, subject=subject,
                                 checkpoint_n=state.checkpoint_n,
+                                window_n=state.window_n,
                                 completion_lens=extra_lens,
                             )
                             pool_gens = generations + extra_gens
@@ -2706,6 +2728,7 @@ class MiningEngine:
                             pool_lens = completion_lens + extra_lens
                             chosen_idxs = _find_in_zone_subset(
                                 pool_rewards, pool_lens, M_ROLLOUTS,
+                                bootstrap=_is_bootstrap_window(state.window_n),
                             )
                             overgen_ms = (time.monotonic() - t_overgen) * 1000.0
                             if chosen_idxs is not None:
@@ -2714,7 +2737,12 @@ class MiningEngine:
                                 completion_lens = [
                                     pool_lens[i] for i in chosen_idxs
                                 ]
-                                sigma, k_solved, in_zone = _zone_status(rewards)
+                                sigma, k_solved, in_zone = _zone_status(
+                                    rewards,
+                                    bootstrap=_is_bootstrap_window(
+                                        state.window_n
+                                    ),
+                                )
                                 self._metrics.record_overgen_recovery()
                                 _emit(
                                     logging.INFO,
@@ -2752,12 +2780,17 @@ class MiningEngine:
                 if not in_zone:
                     self._metrics.record_local_oos()
                     self._ooz_cohorts_in_window.add((level, subject))
+                    _sigma_thr = (
+                        BOOTSTRAP_SIGMA_MIN
+                        if _is_bootstrap_window(state.window_n)
+                        else SIGMA_MIN
+                    )
                     _emit(
                         logging.INFO,
                         "[W=%d] OOZ  prompt=%-4d sigma=%.3f<%.2f k=%d/%d "
                         "cohort=(%s,%s) -> skip submit (cohort blacklisted "
                         "for window)",
-                        state.window_n, prompt_idx, sigma, SIGMA_MIN,
+                        state.window_n, prompt_idx, sigma, _sigma_thr,
                         k_solved, M_ROLLOUTS,
                         _short_level(level), _short_subject(subject),
                     )
@@ -2836,6 +2869,7 @@ class MiningEngine:
                                 prompt_idx, repl_rewards,
                                 level=level, subject=subject,
                                 checkpoint_n=state.checkpoint_n,
+                                window_n=state.window_n,
                                 completion_lens=repl_lens,
                             )
                             new_gens = list(generations)
@@ -2849,7 +2883,10 @@ class MiningEngine:
                                 new_rews[pos] = rr
                                 new_clens[pos] = rl
                             new_min = min(new_clens)
-                            new_sigma, new_k, new_inzone = _zone_status(new_rews)
+                            new_sigma, new_k, new_inzone = _zone_status(
+                                new_rews,
+                                bootstrap=_is_bootstrap_window(state.window_n),
+                            )
                             if new_min >= CHALLENGE_K and new_inzone:
                                 generations = new_gens
                                 rewards = new_rews
@@ -3209,10 +3246,26 @@ class MiningEngine:
         ]
         if not self._pregen_queue:
             return None
-        for i, c in enumerate(self._pregen_queue):
-            if c.in_zone:
-                return self._pregen_queue.pop(i)
-        return self._pregen_queue.pop(0)
+        boot = _is_bootstrap_window(state.window_n)
+        while self._pregen_queue:
+            for i, c in enumerate(self._pregen_queue):
+                sigma, k_solved, in_zone = _zone_status(
+                    c.rewards, bootstrap=boot,
+                )
+                if in_zone:
+                    c.sigma = sigma
+                    c.k_solved = k_solved
+                    c.in_zone = in_zone
+                    return self._pregen_queue.pop(i)
+            dropped = self._pregen_queue.pop(0)
+            _emit(
+                logging.INFO,
+                "[W=%d] PREGEN drop prompt=%-4d (no longer in-zone under "
+                "bootstrap=%s) queue_remaining=%d",
+                state.window_n, dropped.prompt_idx, boot,
+                len(self._pregen_queue),
+            )
+        return None
 
     def _maybe_spawn_pregen(
         self,
@@ -3255,6 +3308,7 @@ class MiningEngine:
                 self.env, cooldown_set,
                 rng=rng, stats=self._prompt_stats,
                 current_checkpoint_n=state.checkpoint_n,
+                window_n=state.window_n,
                 slots_filled=0,
                 superseded_in_window=self._superseded_in_window,
                 open_age_s=0.0,
@@ -3298,9 +3352,13 @@ class MiningEngine:
             prompt_idx, rewards,
             level=level, subject=subject,
             checkpoint_n=state.checkpoint_n,
+            window_n=state.window_n,
             completion_lens=completion_lens,
         )
-        sigma, k_solved, in_zone = _zone_status(rewards)
+        sigma, k_solved, in_zone = _zone_status(
+            rewards,
+            bootstrap=_is_bootstrap_window(state.window_n),
+        )
         self._metrics.record_generation(k_solved)
         self._maybe_persist_stats()
 
