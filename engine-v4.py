@@ -713,13 +713,16 @@ _PREGEN_MAX_AGE_S: float = 180.0
 # GPU time during batch-full / WAIT phases gets converted into ready
 # candidates for the next window.
 _PREGEN_MAX_QUEUE: int = 3
-# Speculative parallel picks: spawn a pregen task alongside each live
-# gen so that OOZ on the live result is recovered from the queue
-# (~30s saved per dead-window pattern like W=1235). Disable if vLLM
-# KV cache OOMs under concurrent gens (env: RELIQUARY_SPECULATIVE_PREGEN=0).
-_SPECULATIVE_PREGEN_ENABLED: bool = os.environ.get(
-    "RELIQUARY_SPECULATIVE_PREGEN", "1",
-).strip().lower() not in ("0", "false", "no", "off")
+
+# Saturation-aware picker: penalize prompts whose recent history is
+# dominated by k=0/8 or k=M/8 results (guaranteed OOZ — cherry-pick
+# can't help). Threshold tuned for binary MATH rewards where most
+# prompts the model has fully learned or fully missed.
+_SATURATION_MIN_OBS: int = 2  # need at least 2 groups before trusting the signal
+_SATURATION_PENALTY_HIGH: float = 0.05  # ≥80% saturated → near-zero
+_SATURATION_PENALTY_MED: float = 0.30   # 50-80% saturated → heavy discount
+_SATURATION_THRESHOLD_HIGH: float = 0.80
+_SATURATION_THRESHOLD_MED: float = 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -799,6 +802,7 @@ class _PromptStats:
         "_superseded_lifetime",
         "_last_cooldown_set",
         "_cohort_cache",
+        "_k_saturated",
     )
 
     def __init__(self) -> None:
@@ -816,6 +820,11 @@ class _PromptStats:
         self._superseded_lifetime: dict[int, int] = {}
         self._last_cooldown_set: frozenset[int] = frozenset()
         self._cohort_cache: dict[int, tuple[str, str]] = {}
+        # Per-prompt saturation tracker: (saturated_groups, total_groups)
+        # where "saturated" = k_solved ∈ {0, M_ROLLOUTS}. Used by the
+        # picker to hard-skip prompts the model has fully learned or
+        # fully missed — these can't be rescued by cherry-pick.
+        self._k_saturated: dict[int, tuple[int, int]] = {}
 
     # ------------------------- cohort helpers -------------------------
 
@@ -946,6 +955,17 @@ class _PromptStats:
         m = self._max_lens.get(idx)
         return m is not None and m >= threshold
 
+    def saturation_rate(self, idx: int, min_obs: int) -> float | None:
+        """Fraction of past full-M groups where k_solved was 0 or M
+        (guaranteed OOZ, unrecoverable). Returns None when fewer than
+        ``min_obs`` groups recorded — picker should fall back to
+        cohort-level signals in that case.
+        """
+        s, n = self._k_saturated.get(idx, (0, 0))
+        if n < min_obs:
+            return None
+        return s / n
+
     # ------------------------- updates -------------------------
 
     def record_group(
@@ -978,12 +998,23 @@ class _PromptStats:
         self._cohort_counts[key] = (cs + solves, cn + attempts)
         self._cohort_last_checkpoint[key] = checkpoint_n
 
-        _, _, group_inzone = _zone_status(rewards)
+        _, group_k, group_inzone = _zone_status(rewards)
         ciz, ctot = self._cohort_inzone.get(key, (0, 0))
         self._cohort_inzone[key] = (
             ciz + (1 if group_inzone else 0),
             ctot + 1,
         )
+
+        # Per-prompt saturation count. Only tracked for full groups
+        # (len == M_ROLLOUTS) — cherry-pick / SHRT-rescue extras would
+        # bias the saturation rate downward because they're smaller M.
+        if attempts == M_ROLLOUTS:
+            sat_s, sat_n = self._k_saturated.get(prompt_idx, (0, 0))
+            is_saturated = group_k == 0 or group_k == M_ROLLOUTS
+            self._k_saturated[prompt_idx] = (
+                sat_s + (1 if is_saturated else 0),
+                sat_n + 1,
+            )
 
         self._cohort_cache[prompt_idx] = (str(level), str(subject))
 
@@ -1111,6 +1142,9 @@ class _PromptStats:
             "superseded_lifetime": {
                 str(k): v for k, v in self._superseded_lifetime.items()
             },
+            "k_saturated": {
+                str(k): list(v) for k, v in self._k_saturated.items()
+            },
         }
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
@@ -1186,6 +1220,11 @@ class _PromptStats:
             self._superseded_lifetime = {
                 int(k): int(v)
                 for k, v in (payload.get("superseded_lifetime") or {}).items()
+            }
+            # k_saturated added post-v2; optional, rebuilds from new obs.
+            self._k_saturated = {
+                int(k): (int(v[0]), int(v[1]))
+                for k, v in (payload.get("k_saturated") or {}).items()
             }
         else:
             # v1 → v2 migration: last_checkpoint=0 treats data as stale.
@@ -1303,6 +1342,19 @@ def pick_prompt_idx(
 
         if stats.has_long_completion(idx, _LONG_COMPLETION_THRESHOLD_TOKENS):
             score *= _LONG_COMPLETION_PENALTY
+
+        # Hard-discount prompts whose recent history is dominated by
+        # k=0/8 or k=M/8 groups. These are unrecoverable (cherry-pick
+        # can't flip a fully-saturated group) and burn ~32s of GPU per
+        # pick to produce nothing. The picker still draws them via
+        # Thompson sampling when alternatives are scarce — multiplicative,
+        # not zero, so the loop never starves.
+        sat_rate = stats.saturation_rate(idx, _SATURATION_MIN_OBS)
+        if sat_rate is not None:
+            if sat_rate >= _SATURATION_THRESHOLD_HIGH:
+                score *= _SATURATION_PENALTY_HIGH
+            elif sat_rate >= _SATURATION_THRESHOLD_MED:
+                score *= _SATURATION_PENALTY_MED
 
         avg_len_val = stats.avg_completion_len(idx)
         if (
@@ -2371,15 +2423,6 @@ class MiningEngine:
                             state.window_n, prompt_idx, len(cached_tokens),
                         )
                     else:
-                        # Speculative parallel pick: kick off a pregen
-                        # alongside this live gen so OOZ on the live
-                        # result doesn't cost a full second PICK+GEN
-                        # cycle. vLLM's continuous batching co-runs both
-                        # when KV cache has headroom; on tight KV cache
-                        # the pregen queues behind, still useful for the
-                        # iter-after-next.
-                        if _SPECULATIVE_PREGEN_ENABLED:
-                            self._maybe_spawn_pregen(state, rng)
                         t_gen = time.monotonic()
                         generations = await asyncio.to_thread(
                             self._generate_n_rollouts,
