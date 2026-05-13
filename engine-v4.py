@@ -223,16 +223,27 @@ _SHORT_COMPLETION_PENALTY: float = 0.10
 _LONG_COMPLETION_THRESHOLD_TOKENS: int = 5600
 _LONG_COMPLETION_PENALTY: float = 1.0
 
-# Tier 3 (2026-05-13): soft max-length cap. The protocol allows up to
-# MAX_NEW_TOKENS_PROTOCOL_CAP (8192), and the validator accepts max-length
-# termination. But the slowest rollout in a batched gen dictates wall-
-# clock — capping at 5000 saves ~35% gen time at the cost of missing
-# answers boxed past token 5000 (rare for Qwen3-4B on MATH; the boxed
-# answer almost always lands in the first ~3000 tokens with the rest
-# being verbose verification). Env var override so operators can A/B
-# without code change. 0 = disabled (protocol max 8192).
+# Soft max-length cap.
+#
+# ⚠ DISABLED by default (was 5000, then 6000): the validator's
+# verify_termination_ok accepts max-length termination ONLY at
+# MAX_NEW_TOKENS_PROTOCOL_CAP (8192). Any rollout that hits a cap
+# BELOW 8192 fails the at-max check; if its last token also isn't EOS,
+# the rollout is rejected with `bad_termination` during async GRAIL.
+# Async rejections are not communicated to the miner — the local log
+# happily shows "accepted=True status=QUEUED" while the validator drops
+# every truncated submission. This silently zeroed our score for many
+# windows before we noticed the absence from the leaderboard.
+#
+# The right path: let rollouts run to the protocol cap (8192) where
+# at-max termination is valid. Gen time goes back up by ~35 % on the
+# long-tail rollout, but submissions actually count.
+#
+# Env var override remains for operators who want to A/B test on a
+# different validator that uses a stricter termination check. 0 =
+# disabled (uses protocol max 8192).
 _SOFT_MAX_NEW_TOKENS_CAP: int = int(
-    os.environ.get("RELIQUARY_SOFT_MAX_NEW_TOKENS", "5000") or 0
+    os.environ.get("RELIQUARY_SOFT_MAX_NEW_TOKENS", "0") or 0
 )
 
 # Time-budget-aware picker penalties: estimate
@@ -879,10 +890,18 @@ _SUPERSEDED_THRESHOLD_MED: float = 0.25
 
 # Own-SUB pregen-mode threshold: once we've landed N successful submits
 # in the current window, redirect GPU from live gen to pregen for the
-# NEXT window. Fixes the "validator says submit too late" FIFO problem
-# by building a warm queue so the next window's first SUB lands fast.
-# Validators typically accept 1 SUB per miner per window, so 1 = correct.
-_OWN_SUB_PREGEN_THRESHOLD: int = 1
+# NEXT window.
+#
+# 4 (was 1): empirical evidence from W=1539 leaderboard shows the
+# protocol does NOT cap submissions per miner per window. Top miner
+# UID 186 submits 7 rollouts/window and lands 4 in the 8-slot batch
+# (50 % of every window's emission). With threshold=1 we voluntarily
+# exited the race after our first accepted SUB and let competitors
+# fill the remaining 7 slots. Bumping to 4 lets us race for up to 4
+# slots per window — matching UID 186's volume strategy. The pregen
+# queue still warms up for the next window during the gaps between
+# submits + after threshold is hit.
+_OWN_SUB_PREGEN_THRESHOLD: int = 4
 
 
 # ---------------------------------------------------------------------------
