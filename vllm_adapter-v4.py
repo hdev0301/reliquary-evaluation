@@ -373,18 +373,44 @@ class VLLMAdapter:
         }
         if self._kv_cache_dtype and self._kv_cache_dtype.lower() != "auto":
             llm_kwargs["kv_cache_dtype"] = self._kv_cache_dtype
+        # Speculative decoding API depends on vLLM version:
+        #   - vLLM <0.7: flat kwargs ``speculative_model`` + ``num_speculative_tokens``
+        #   - vLLM >=0.7: nested dict ``speculative_config={"model":..., "num_speculative_tokens":...}``
+        # We attempt the modern dict-based form first; if vLLM raises a
+        # TypeError signalling the old API, fall back to flat kwargs.
+        spec_kwargs_modern: dict[str, Any] | None = None
+        spec_kwargs_legacy: dict[str, Any] | None = None
         if spec_enabled:
-            llm_kwargs["speculative_model"] = self._speculative_model
-            llm_kwargs["num_speculative_tokens"] = (
-                self._num_speculative_tokens
-            )
+            spec_kwargs_modern = {
+                "speculative_config": {
+                    "model": self._speculative_model,
+                    "num_speculative_tokens": self._num_speculative_tokens,
+                },
+            }
+            spec_kwargs_legacy = {
+                "speculative_model": self._speculative_model,
+                "num_speculative_tokens": self._num_speculative_tokens,
+            }
 
         with _Heartbeat(
             f"LLM(...) construct model={model_path.split('/')[-1]} "
             f"gpu=cuda:{gpu_id}",
             extra_fn=lambda: _gpu_mem_str(gpu_id),
         ):
-            self._llm = LLM(**llm_kwargs)
+            if spec_enabled and spec_kwargs_modern is not None:
+                try:
+                    self._llm = LLM(**llm_kwargs, **spec_kwargs_modern)
+                except TypeError as e:
+                    if "speculative_config" in str(e):
+                        logger.warning(
+                            "vLLM rejected speculative_config dict; "
+                            "falling back to legacy flat kwargs. err=%s", e,
+                        )
+                        self._llm = LLM(**llm_kwargs, **spec_kwargs_legacy)
+                    else:
+                        raise
+            else:
+                self._llm = LLM(**llm_kwargs)
 
         self._model_path = model_path
         logger.info(
