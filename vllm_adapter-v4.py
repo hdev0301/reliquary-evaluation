@@ -312,6 +312,7 @@ class VLLMAdapter:
         kv_cache_dtype: str | None = None,
         speculative_model: str | None = None,
         num_speculative_tokens: int = 0,
+        attention_backend: str | None = None,
     ) -> None:
         self._model_path = model_path
         self._gpu_id = gpu_id
@@ -323,6 +324,9 @@ class VLLMAdapter:
         # batch fit in the pre-allocated KV pool. "fp8" works on Hopper/
         # Blackwell; "auto"/None falls back to model dtype.
         self._kv_cache_dtype = kv_cache_dtype
+        # Passed to LLM(...) directly; setting the legacy
+        # VLLM_ATTENTION_BACKEND env var is silently ignored in vLLM v1.
+        self._attention_backend = attention_backend
         # Tier 2: speculative decoding via a small draft model. The draft
         # proposes `num_speculative_tokens` tokens per step; the target
         # model verifies all of them in one forward pass. Typical
@@ -349,10 +353,11 @@ class VLLMAdapter:
         logger.info(
             "vLLM build start: model=%s dtype=%s max_model_len=%d "
             "gpu_mem_util=%.2f enforce_eager=%s kv_cache_dtype=%s "
-            "spec=%s gpu=cuda:%d %s",
+            "attn=%s spec=%s gpu=cuda:%d %s",
             model_path, self._dtype, self._max_model_len,
             self._gpu_memory_utilization, self._enforce_eager,
             self._kv_cache_dtype or "auto",
+            self._attention_backend or "auto",
             (
                 f"{self._speculative_model.split('/')[-1]}@k={self._num_speculative_tokens}"
                 if spec_enabled
@@ -370,9 +375,18 @@ class VLLMAdapter:
             "max_model_len": self._max_model_len,
             "enforce_eager": self._enforce_eager,
             "disable_log_stats": True,
+            # Math env reuses the same chat template + system prompt across
+            # all 12,500 prompts, so prefix caching turns repeated prefill
+            # work into a one-time cost. Chunked prefill is required for
+            # FlashInfer to interleave prefill with decode efficiently and
+            # is a no-op on workloads without long prompts.
+            "enable_prefix_caching": True,
+            "enable_chunked_prefill": True,
         }
         if self._kv_cache_dtype and self._kv_cache_dtype.lower() != "auto":
             llm_kwargs["kv_cache_dtype"] = self._kv_cache_dtype
+        if self._attention_backend:
+            llm_kwargs["attention_backend"] = self._attention_backend
         # Speculative decoding API depends on vLLM version:
         #   - vLLM <0.7: flat kwargs ``speculative_model`` + ``num_speculative_tokens``
         #   - vLLM >=0.7: nested dict ``speculative_config={"model":..., "num_speculative_tokens":...}``
@@ -531,3 +545,4 @@ class VLLMAdapter:
         pad_id = pad_token_id if pad_token_id is not None else 0
         padded = [r + [pad_id] * (max_len - len(r)) for r in rows]
         return torch.tensor(padded, device=self.device)
+

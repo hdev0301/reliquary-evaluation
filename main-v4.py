@@ -484,6 +484,7 @@ def _build_vllm_adapter(
     kv_cache_dtype: str | None = None,
     speculative_model: str | None = None,
     num_speculative_tokens: int = 0,
+    attention_backend: str | None = None,
 ):
     """Construct VLLMAdapter (the ~30-60s blocking vLLM init).
 
@@ -503,6 +504,7 @@ def _build_vllm_adapter(
             kv_cache_dtype=kv_cache_dtype,
             speculative_model=speculative_model,
             num_speculative_tokens=num_speculative_tokens,
+            attention_backend=attention_backend,
         )
 
 
@@ -655,13 +657,16 @@ def mine(
         help="Disable vLLM CUDA graphs (slower but lower memory).",
     ),
     kv_cache_dtype: str = typer.Option(
-        "auto",
+        "fp8",
         help=(
-            "vLLM KV cache dtype. 'auto' = match model dtype. 'fp8' "
-            "halves KV memory (Hopper/Blackwell only) so larger batches "
-            "fit in the preallocated pool — typically 10-15%% gen "
-            "throughput gain. Set to 'auto' if you see numerical "
-            "regressions in GRAIL sketches."
+            "vLLM KV cache dtype. 'fp8' halves attention memory on "
+            "Hopper/Blackwell (H100/H200/B200) — same memory budget now "
+            "holds ~2x the in-flight KV tokens, so bigger batches and "
+            "less preemption. Generation tokens are still drawn from "
+            "the protocol distribution; the GRAIL proof model is a "
+            "separate bf16 HF model so the proof path is unaffected. "
+            "Set to 'auto' to fall back to bf16 KV if you see in-zone "
+            "hit-rate regression."
         ),
     ),
     attention_backend: str = typer.Option(
@@ -722,13 +727,13 @@ def mine(
     os.environ["BT_NETWORK"] = network
     os.environ["NETUID"] = str(netuid)
 
-    # Tier 1: optional attention backend override. MUST be set before
-    # any transitive vLLM import — that's why we touch it here, before
-    # _run() is even constructed.
+    # Tier 1: optional attention backend override. Passed to the
+    # VLLMAdapter constructor (and from there to LLM(...)) rather than
+    # via VLLM_ATTENTION_BACKEND env, which vLLM v1 ignores with a
+    # "Unknown vLLM environment variable" warning.
     if attention_backend:
-        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
         logger.info(
-            "VLLM_ATTENTION_BACKEND=%s (override). On B200, FLASHINFER "
+            "attention_backend=%s (override). On H100/H200/B200, FLASHINFER "
             "typically yields 10-20%% faster decode.",
             attention_backend,
         )
@@ -875,6 +880,7 @@ def mine(
                     gpu_memory_utilization, enforce_eager,
                     kv_cache_dtype, speculative_model or None,
                     num_speculative_tokens,
+                    attention_backend or None,
                 )
                 logger.info("vllm adapter ready — synchronizing GPU before HF proof model load")
                 await asyncio.to_thread(_gpu_sync_and_clear, vllm_gpu)
@@ -896,6 +902,7 @@ def mine(
                     gpu_memory_utilization, enforce_eager,
                     kv_cache_dtype, speculative_model or None,
                     num_speculative_tokens,
+                    attention_backend or None,
                 )
                 hf_task = asyncio.to_thread(
                     _build_hf_proof_model,
@@ -1133,3 +1140,4 @@ def validate(
 
 if __name__ == "__main__":
     app()
+

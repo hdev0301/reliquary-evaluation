@@ -852,11 +852,12 @@ class _PregenCandidate:
 # pair, so a 30-min-old in-zone candidate is mathematically identical
 # to a fresh one (the validator can't tell them apart).
 _PREGEN_MAX_AGE_S: float = 1800.0
-# Max simultaneous queued pregen candidates. Bumped from 1 → 3 so that
-# multiple OPEN submissions benefit (not just the first), and so idle
-# GPU time during batch-full / WAIT phases gets converted into ready
-# candidates for the next window.
-_PREGEN_MAX_QUEUE: int = 3
+# Max simultaneous queued pregen candidates. Bumped from 1 → 3 → 6: with
+# the observed ~25-min idle windows (e.g. W=1576), a deeper queue means
+# more in-zone candidates ready to fire instantly when the next window
+# opens — the difference between open_age=5s and open_age=70s on the
+# first submission. Pure Python state; memory cost is negligible.
+_PREGEN_MAX_QUEUE: int = 6
 
 # Saturation-aware picker: penalize prompts whose recent history is
 # dominated by k=0/8 or k=M/8 results (guaranteed OOZ — cherry-pick
@@ -4055,3 +4056,4 @@ class MiningEngine:
                 block_hash, beacon["randomness"], drand_round=beacon["round"]
             )
         return chain.compute_window_randomness(block_hash)
+
