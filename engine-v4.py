@@ -713,6 +713,13 @@ _PREGEN_MAX_AGE_S: float = 180.0
 # GPU time during batch-full / WAIT phases gets converted into ready
 # candidates for the next window.
 _PREGEN_MAX_QUEUE: int = 3
+# Speculative parallel picks: spawn a pregen task alongside each live
+# gen so that OOZ on the live result is recovered from the queue
+# (~30s saved per dead-window pattern like W=1235). Disable if vLLM
+# KV cache OOMs under concurrent gens (env: RELIQUARY_SPECULATIVE_PREGEN=0).
+_SPECULATIVE_PREGEN_ENABLED: bool = os.environ.get(
+    "RELIQUARY_SPECULATIVE_PREGEN", "1",
+).strip().lower() not in ("0", "false", "no", "off")
 
 
 # ---------------------------------------------------------------------------
@@ -2364,6 +2371,15 @@ class MiningEngine:
                             state.window_n, prompt_idx, len(cached_tokens),
                         )
                     else:
+                        # Speculative parallel pick: kick off a pregen
+                        # alongside this live gen so OOZ on the live
+                        # result doesn't cost a full second PICK+GEN
+                        # cycle. vLLM's continuous batching co-runs both
+                        # when KV cache has headroom; on tight KV cache
+                        # the pregen queues behind, still useful for the
+                        # iter-after-next.
+                        if _SPECULATIVE_PREGEN_ENABLED:
+                            self._maybe_spawn_pregen(state, rng)
                         t_gen = time.monotonic()
                         generations = await asyncio.to_thread(
                             self._generate_n_rollouts,
