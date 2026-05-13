@@ -199,11 +199,13 @@ _LONG_COMPLETION_PENALTY: float = 1.0
 # Tier 3 (2026-05-13): soft max-length cap. The protocol allows up to
 # MAX_NEW_TOKENS_PROTOCOL_CAP (8192), and the validator accepts max-length
 # termination. But the slowest rollout in a batched gen dictates wall-
-# clock — capping at ~6000 saves ~25% gen time at the cost of missing
-# answers boxed past token 6000 (rare for Qwen3-4B on MATH). Env var
-# override so operators can A/B without code change. 0 = disabled.
+# clock — capping at 5000 saves ~35% gen time at the cost of missing
+# answers boxed past token 5000 (rare for Qwen3-4B on MATH; the boxed
+# answer almost always lands in the first ~3000 tokens with the rest
+# being verbose verification). Env var override so operators can A/B
+# without code change. 0 = disabled (protocol max 8192).
 _SOFT_MAX_NEW_TOKENS_CAP: int = int(
-    os.environ.get("RELIQUARY_SOFT_MAX_NEW_TOKENS", "6000") or 0
+    os.environ.get("RELIQUARY_SOFT_MAX_NEW_TOKENS", "5000") or 0
 )
 
 # Time-budget-aware picker penalties: estimate
@@ -444,6 +446,10 @@ def _emit(level: int, fmt: str, *args) -> None:
         and " SUB  " not in msg
         and "PREGEN" not in msg
         and "pregen=" not in msg
+        # STATE-PROBE pre-/post-proof failures kill the fast-path skip
+        # (force a second /state RTT) — surface them so operators can
+        # spot a flaky validator endpoint instead of paying for it silently.
+        and "STATE-PROBE" not in msg
     ):
         return
 
@@ -792,9 +798,17 @@ class _PregenCandidate:
     created_at_checkpoint_n: int
 
 
-# Maximum staleness of a pregen candidate before it gets discarded. Older
-# than this and the cohort signal / cooldown set has drifted too far.
-_PREGEN_MAX_AGE_S: float = 180.0
+# Maximum staleness of a pregen candidate before it gets discarded.
+#
+# 360s (was 180): empirically, window cadence is ~310s (validator
+# CADENCE_MS) so a pregen produced mid-window-N is ~150-300s old by the
+# time window N+1's OPEN actually fires. At 180s the late-window
+# pregens consistently aged out before consumption — wasting the 24-28s
+# of GPU we spent producing them. The cohort/cooldown-drift concern is
+# already handled by the per-consume checks (cooldown_set, checkpoint_n,
+# superseded_in_window). Underlying prompt content doesn't change, so a
+# 6-minute-old rollout is still mathematically valid.
+_PREGEN_MAX_AGE_S: float = 360.0
 # Max simultaneous queued pregen candidates. Bumped from 1 → 3 so that
 # multiple OPEN submissions benefit (not just the first), and so idle
 # GPU time during batch-full / WAIT phases gets converted into ready
@@ -805,7 +819,15 @@ _PREGEN_MAX_QUEUE: int = 3
 # dominated by k=0/8 or k=M/8 results (guaranteed OOZ — cherry-pick
 # can't help). Threshold tuned for binary MATH rewards where most
 # prompts the model has fully learned or fully missed.
-_SATURATION_MIN_OBS: int = 2  # need at least 2 groups before trusting the signal
+#
+# MIN_OBS=1 (was 2): act on the FIRST saturated observation. The
+# alternative (waiting for a second confirmation) costs ~24s of
+# wasted gen per repeated saturated draw — far worse than the rare
+# false-positive cost of a one-off k=8/8 fluke on a true p≈0.7
+# prompt (~5% expected freq). Thompson sampling + multiplicative
+# penalty (not zero) lets the picker re-explore if the rest of the
+# pool dries up.
+_SATURATION_MIN_OBS: int = 1
 _SATURATION_PENALTY_HIGH: float = 0.05  # ≥80% saturated → near-zero
 _SATURATION_PENALTY_MED: float = 0.30   # 50-80% saturated → heavy discount
 _SATURATION_THRESHOLD_HIGH: float = 0.80
