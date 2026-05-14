@@ -169,8 +169,14 @@ _NEAR_FULL_SLOTS_THRESHOLD = max(1, B_BATCH - 2)
 
 # Congestion tilt: down-weight zone_p by arrival_rate (proxy for popular
 # prompts that other miners are winning).
-_CONGESTION_WEIGHT = 0.4
-_ARRIVAL_EMA_ALPHA = 0.05
+# Tuned 2026-05-14 after validator-side confirmation that we lose the FIFO
+# race on every window. Pushes the picker toward less-contested prompts —
+# but only moderately. 0.8 was too aggressive (8% in-zone yield because
+# uncontested prompts are mostly saturated k=0/8 or k=8/8 in our model);
+# 0.6 keeps a useful tilt toward unclaimed prompts without exiling us to
+# the saturated wasteland. Fast EMA learning is kept so we adapt quickly.
+_CONGESTION_WEIGHT = 0.6
+_ARRIVAL_EMA_ALPHA = 0.15
 _ARRIVAL_QUIESCENT_DECAY = 1.0 - _ARRIVAL_EMA_ALPHA * 0.1
 _ARRIVAL_PRUNE_BELOW = 1e-4
 
@@ -834,6 +840,22 @@ class _PregenCandidate:
     created_at_t: float
     created_at_window_n: int
     created_at_checkpoint_n: int
+    # Pre-computed HF proof state — populated by ``_precompute_proof_state``
+    # at pregen time. When present, the submit-time proof builder skips the
+    # ~1.5s HF forward and assembles commitments + signatures from this
+    # cache. None when the pre-compute failed or the candidate predates
+    # this feature; submit path falls back to live HF forward.
+    #
+    # Schema:
+    #   {
+    #       "hidden_states_batch": torch.Tensor [M, max_len, hidden_dim] on GPU,
+    #       "token_logprobs_per_rollout": list[list[float]],
+    #       "real_lens": list[int],
+    #       "prompt_length": int,
+    #       "token_lists": list[list[int]],  # canonical token sequences
+    #       "model_name": str,
+    #   }
+    cached_proof_state: dict | None = None
 
 
 # Maximum staleness of a pregen candidate before it gets discarded.
@@ -3122,10 +3144,19 @@ class MiningEngine:
                 # Build GRAIL proofs — dispatched off-loop so the event
                 # loop can drain the previous submit's response in parallel.
                 t_proof = time.monotonic()
+                # Reuse pregen-cached HF forward if available — saves ~1.5s
+                # on the OPEN-phase critical path. The cache is only honored
+                # when the actual ``generations`` match what was pre-computed
+                # (validated inside _build_rollout_submissions_batched). Any
+                # mismatch falls back to live HF forward, so this is safe
+                # even if SHRT/CHRY rescue mutated the rollout list.
+                _proof_cache = (
+                    pregen.cached_proof_state if pregen is not None else None
+                )
                 try:
                     rollout_submissions = await asyncio.to_thread(
                         self._build_rollout_submissions,
-                        generations, rewards, randomness,
+                        generations, rewards, randomness, _proof_cache,
                     )
                 except Exception as proof_exc:
                     _emit(
@@ -3569,6 +3600,24 @@ class MiningEngine:
             )
             return
 
+        # Pre-compute the HF proof state now (off the critical path). Cuts
+        # ~1.5s off submit-time wall-clock when this pregen is consumed.
+        # On any failure (CUDA OOM, model not ready), proceed without cache;
+        # submit path falls back to live HF forward.
+        cached_proof_state: dict | None = None
+        if self._metrics.batched_proof_active:
+            try:
+                cached_proof_state = await asyncio.to_thread(
+                    self._precompute_proof_state, generations,
+                )
+            except Exception:
+                logger.exception(
+                    "[W=%d] PREGEN proof pre-compute failed for prompt=%d; "
+                    "live HF forward at submit time as fallback",
+                    state.window_n, prompt_idx,
+                )
+                cached_proof_state = None
+
         candidate = _PregenCandidate(
             prompt_idx=prompt_idx,
             level=level,
@@ -3583,6 +3632,7 @@ class MiningEngine:
             created_at_t=time.monotonic(),
             created_at_window_n=state.window_n,
             created_at_checkpoint_n=state.checkpoint_n,
+            cached_proof_state=cached_proof_state,
         )
         self._pregen_queue.append(candidate)
 
@@ -3698,9 +3748,14 @@ class MiningEngine:
         and enough prior samples, tightens max_new_tokens via
         ``_prompt_stats.completion_budget`` to bound the slowest rollout
         (which dictates batched gen wall-clock).
-        """
-        import torch
 
+        Termination-safety rescue: when a soft cap is in effect, any
+        rollout that hits the cap without EOS would silently fail the
+        validator's ``verify_termination_ok`` (bad_termination) during
+        async GRAIL — local logs would still show accepted=True. Those
+        rollouts are regenerated at the protocol cap (8192), where the
+        result is either EOS-terminated OR at-protocol-max — both valid.
+        """
         prompt_tokens = self.tokenizer.encode(
             problem["prompt"], add_special_tokens=False
         )
@@ -3714,23 +3769,53 @@ class MiningEngine:
         )
         effective_max_new = min(self.max_new_tokens, budget)
 
-        # Posterior-budget shortening disabled (2026-05-13). Empirical
-        # competitor analysis showed top miners consistently generate to
-        # the protocol max (8192 tokens) — the validator extracts the
-        # boxed answer from anywhere in the completion, and max-length
-        # rollouts dominate the score table. Shortening max_new_tokens
-        # to ~2× historical mean was a GPU-time optimization that costs
-        # us in_zone hits whenever the model would have boxed the answer
-        # past the shortened cap. Leaving the helper in place for future
-        # diagnostics; just not consuming it here.
-
-        # Tier 3 soft cap: bound the slowest rollout's wall-clock without
-        # sacrificing the max-length strategy entirely. 6000 is the
-        # default — past the 95th percentile of boxed-answer positions
-        # observed on Qwen3-4B + MATH. Override with the
-        # RELIQUARY_SOFT_MAX_NEW_TOKENS env var; set to 0 to disable.
+        # Soft cap: bound the slowest rollout's wall-clock. Override with
+        # the RELIQUARY_SOFT_MAX_NEW_TOKENS env var; 0 = disabled (protocol cap).
         if _SOFT_MAX_NEW_TOKENS_CAP > 0:
             effective_max_new = min(effective_max_new, _SOFT_MAX_NEW_TOKENS_CAP)
+
+        rollouts = self._run_vllm_batch(
+            prompt_tokens, prompt_length, n, effective_max_new,
+        )
+
+        # Rescue any rollout whose last token isn't EOS and whose length is
+        # below the protocol cap — those are the ones the validator would
+        # silently reject as bad_termination. Regenerate at the protocol cap
+        # so each rescued rollout terminates either with EOS or at-max-8192.
+        if effective_max_new < budget:
+            rescue_indices: list[int] = [
+                i for i, r in enumerate(rollouts)
+                if r["tokens"] and r["tokens"][-1] not in self._eos_ids
+            ]
+            if rescue_indices:
+                logger.info(
+                    "[rescue] regenerating %d/%d rollouts at protocol cap=%d "
+                    "(soft cap %d hit without EOS) prompt_idx=%s",
+                    len(rescue_indices), n, budget, effective_max_new,
+                    prompt_idx,
+                )
+                rescued = self._run_vllm_batch(
+                    prompt_tokens, prompt_length, len(rescue_indices), budget,
+                )
+                for slot, r in zip(rescue_indices, rescued):
+                    rollouts[slot] = r
+
+        return rollouts
+
+    def _run_vllm_batch(
+        self,
+        prompt_tokens: list[int],
+        prompt_length: int,
+        n: int,
+        max_new_tokens: int,
+    ) -> list[dict]:
+        """One batched vLLM .generate() + per-row EOS truncation.
+
+        Returns ``n`` rollouts in {"tokens", "prompt_length"} form. Each row
+        is truncated at the first post-prompt EOS; rows that didn't EOS-
+        terminate retain all generated tokens (length == max_new_tokens).
+        """
+        import torch
 
         with torch.no_grad():
             device_str = getattr(self.vllm_model, "device", "cpu")
@@ -3742,7 +3827,7 @@ class MiningEngine:
             )
             outputs = self.vllm_model.generate(
                 input_tensor,
-                max_new_tokens=effective_max_new,
+                max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=T_PROTO,
                 top_p=TOP_P_PROTO,
@@ -3779,18 +3864,128 @@ class MiningEngine:
         reward = self.env.compute_reward(problem, completion_text)
         return reward, len(completion_tokens)
 
+    def _precompute_proof_state(
+        self,
+        generations: list[dict],
+    ) -> dict | None:
+        """Run the HF proof forward and stash its outputs for later reuse.
+
+        Called off the OPEN-phase critical path during pregen. The returned
+        dict carries everything ``_build_rollout_submissions_batched`` needs
+        EXCEPT the window-randomness-dependent pieces (r_vec, commitments,
+        signature, merkle), which are still finalized at submit time. Cuts
+        ~1.5s off submit-time wall-clock — the HF forward dominates that
+        critical-path cost on n=8 batched rollouts at 8192 tokens.
+
+        Memory cost: hidden_states_batch is roughly
+        M * max_len * hidden_dim * 2B (bf16) ≈ 8 * 8192 * hidden * 2 ≈
+        ~320 MB per pregen. With ``_PREGEN_MAX_QUEUE = 6`` the worst-case
+        steady-state residency is ~1.9 GB, well inside the post-load
+        headroom on H200 NVL.
+
+        Logits are NOT cached — only the gathered ``token_logprobs`` are
+        kept (a few hundred KB per pregen). The vocab-sized logits tensor
+        is dropped after the gather.
+        """
+        import torch
+        from reliquary.shared.forward import forward_single_layer
+
+        if not generations:
+            return None
+
+        prompt_length = generations[0]["prompt_length"]
+        first_prompt = generations[0]["tokens"][:prompt_length]
+        for g in generations[1:]:
+            if (
+                g["prompt_length"] != prompt_length
+                or g["tokens"][:prompt_length] != first_prompt
+            ):
+                # Mixed-prefix batch can't share a forward — submit path
+                # will fall back to per-rollout proofs regardless.
+                return None
+
+        token_lists: list[list[int]] = [g["tokens"] for g in generations]
+        real_lens: list[int] = [len(t) for t in token_lists]
+        max_len: int = max(real_lens)
+        M = len(generations)
+
+        pad_id = self.tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self.tokenizer.eos_token_id or 0
+
+        padded_rows: list[list[int]] = []
+        for tokens, rl in zip(token_lists, real_lens):
+            padded_rows.append(tokens + [pad_id] * (max_len - rl))
+
+        device = f"cuda:{self.proof_gpu}"
+        proof_input = torch.tensor(padded_rows, dtype=torch.long, device=device)
+        attention_mask = torch.zeros(
+            (M, max_len), dtype=torch.long, device=device,
+        )
+        for i, rl in enumerate(real_lens):
+            attention_mask[i, :rl] = 1
+
+        with torch.no_grad():
+            hidden_states_batch, logits_batch = forward_single_layer(
+                self.hf_model, proof_input, attention_mask, LAYER_INDEX
+            )
+
+        # Gather per-rollout token_logprobs now so we can drop the
+        # vocab-sized logits tensor immediately.
+        token_logprobs_per_rollout: list[list[float]] = []
+        for i in range(M):
+            real_len = real_lens[i]
+            all_tokens = token_lists[i]
+            if real_len > prompt_length:
+                log_probs = torch.log_softmax(
+                    logits_batch[i, :real_len].float(), dim=-1,
+                )
+                row_idx = torch.arange(
+                    prompt_length - 1, real_len - 1,
+                    device=log_probs.device,
+                )
+                col_idx = torch.tensor(
+                    all_tokens[prompt_length:real_len],
+                    device=log_probs.device, dtype=torch.long,
+                )
+                token_logprobs_per_rollout.append(
+                    log_probs[row_idx, col_idx].tolist()
+                )
+            else:
+                token_logprobs_per_rollout.append([])
+
+        # Drop logits explicitly; hidden_states_batch is what we keep.
+        del logits_batch
+        del proof_input
+        del attention_mask
+
+        model_name: str = getattr(self.hf_model, "name_or_path", "unknown")
+        return {
+            "hidden_states_batch": hidden_states_batch,
+            "token_logprobs_per_rollout": token_logprobs_per_rollout,
+            "real_lens": real_lens,
+            "prompt_length": prompt_length,
+            "token_lists": token_lists,
+            "model_name": model_name,
+        }
+
     def _build_rollout_submissions(
         self,
         generations: list[dict],
         rewards: list[float],
         randomness: str,
+        proof_cache: dict | None = None,
     ) -> list[RolloutSubmission]:
         """Build RolloutSubmissions — batched path when active, per-rollout
         fallback after consecutive GRAIL_FAILs.
+
+        ``proof_cache`` (optional) carries the pre-computed HF forward state
+        from a pregen candidate, letting the batched path skip the expensive
+        HF forward on the OPEN-phase critical path.
         """
         if self._metrics.batched_proof_active:
             return self._build_rollout_submissions_batched(
-                generations, rewards, randomness,
+                generations, rewards, randomness, proof_cache,
             )
         return [
             self._build_rollout_submission_single(g, rew, randomness)
@@ -3886,6 +4081,7 @@ class MiningEngine:
         generations: list[dict],
         rewards: list[float],
         randomness: str,
+        proof_cache: dict | None = None,
     ) -> list[RolloutSubmission]:
         """ONE padded HF forward for all M rollouts.
 
@@ -3931,6 +4127,23 @@ class MiningEngine:
         real_lens: list[int] = [len(t) for t in token_lists]
         max_len: int = max(real_lens)
         M = len(generations)
+
+        # Fast path: pregen-pre-computed proof state. The HF forward already
+        # ran off the critical path; we just generate r_vec and finalize the
+        # randomness-dependent pieces. Validates the cache matches the
+        # actual generations before trusting it — if a mismatch were ever
+        # introduced (a bug elsewhere), we'd otherwise sign an inconsistent
+        # bundle. On any mismatch, fall through to the live forward path.
+        if (
+            proof_cache is not None
+            and proof_cache.get("hidden_states_batch") is not None
+            and proof_cache.get("token_lists") == token_lists
+            and proof_cache.get("real_lens") == real_lens
+            and proof_cache.get("prompt_length") == prompt_length
+        ):
+            return self._build_submissions_from_cache(
+                proof_cache, rewards, randomness, generations,
+            )
 
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
@@ -4020,6 +4233,73 @@ class MiningEngine:
                 )
             )
 
+        return submissions
+
+    def _build_submissions_from_cache(
+        self,
+        proof_cache: dict,
+        rewards: list[float],
+        randomness: str,
+        generations: list[dict],
+    ) -> list[RolloutSubmission]:
+        """Finalize a batch of RolloutSubmissions from a pregen-cached proof
+        state. The expensive HF forward already ran in ``_precompute_proof_state``;
+        here we only do the cheap randomness-dependent finalization:
+        r_vec, per-rollout sketch commitments, signatures, and packaging.
+
+        Bit-identical output to ``_build_rollout_submissions_batched`` for
+        the same inputs — the HF forward and token_logprobs are reused from
+        the cached run, so even ULP-level kernel-scheduling drift is
+        eliminated between pregen and submit.
+        """
+        from reliquary.constants import GRAIL_PROOF_VERSION
+        from reliquary.protocol.signatures import sign_commit_binding
+
+        hidden_states_batch = proof_cache["hidden_states_batch"]
+        token_logprobs_per_rollout: list[list[float]] = (
+            proof_cache["token_logprobs_per_rollout"]
+        )
+        real_lens: list[int] = proof_cache["real_lens"]
+        prompt_length: int = proof_cache["prompt_length"]
+        token_lists: list[list[int]] = proof_cache["token_lists"]
+        model_name: str = proof_cache["model_name"]
+
+        r_vec = self._verifier.generate_r_vec(randomness)
+        submissions: list[RolloutSubmission] = []
+        for i, rew in enumerate(rewards):
+            real_len = real_lens[i]
+            all_tokens = token_lists[i]
+            hidden_states_i = hidden_states_batch[i, :real_len]
+            commitments = self._verifier.create_commitments_batch(
+                hidden_states_i, r_vec,
+            )
+            signature = sign_commit_binding(
+                all_tokens, randomness, model_name, LAYER_INDEX,
+                commitments, self.wallet,
+            )
+            commit = {
+                "tokens": all_tokens,
+                "commitments": commitments,
+                "proof_version": GRAIL_PROOF_VERSION,
+                "model": {"name": model_name, "layer_index": LAYER_INDEX},
+                "signature": signature.hex(),
+                "beacon": {"randomness": randomness},
+                "rollout": {
+                    "prompt_length": prompt_length,
+                    "completion_length": real_len - prompt_length,
+                    "success": True,
+                    "total_reward": 0.0,
+                    "advantage": 0.0,
+                    "token_logprobs": token_logprobs_per_rollout[i],
+                },
+            }
+            submissions.append(
+                RolloutSubmission(
+                    tokens=all_tokens,
+                    reward=rew,
+                    commit=commit,
+                )
+            )
         return submissions
 
     async def _randomness_for_window(
