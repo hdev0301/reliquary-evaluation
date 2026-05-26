@@ -68,6 +68,7 @@ from reliquary.protocol.submission import (
     BatchSubmissionRequest,
     RolloutSubmission,
 )
+from reliquary.validator.dedup import compute_rollout_hash
 
 if TYPE_CHECKING:
     from reliquary.environment.base import Environment
@@ -174,14 +175,40 @@ def _compute_merkle_root(rollouts) -> str:
 def _current_drand_round_at_send() -> int:
     """Drand quicknet round currently in progress at wall-clock now.
 
-    Called just before POSTing /submit so the attached round matches what
-    the validator sees at receipt (modulo the configured tolerance).
+    Called just before POSTing /submit so the attached round matches
+    what the validator sees at receipt (modulo the configured
+    tolerance).
+
+    Boundary-safety: constants.py specifically warns: "a miner firing
+    at t=2.99s of round R would land at the validator at t=3.00s of
+    R+1." With DRAND_ROUND_BACKWARD_TOLERANCE=0, that crossing
+    produces a stale_round reject. Absorb up to ``safety_s`` of POST
+    + validator-queue latency by sleeping past the next boundary
+    whenever we're within that window of one. Tuned via
+    RELIQUARY_DRAND_BOUNDARY_SAFETY_S; default 0.5 s.
     """
     from reliquary.infrastructure.chain import compute_current_drand_round
     from reliquary.infrastructure.drand import get_current_chain
 
     ci = get_current_chain()
-    return compute_current_drand_round(time.time(), ci["genesis_time"], ci["period"])
+    genesis = float(ci["genesis_time"])
+    period = float(ci["period"])
+    try:
+        safety_s = float(
+            os.environ.get("RELIQUARY_DRAND_BOUNDARY_SAFETY_S", "0.5")
+        )
+    except ValueError:
+        safety_s = 0.5
+    now = time.time()
+    # Seconds remaining in the current drand round. If under safety,
+    # sleep past the boundary so the round we attach has a fresh
+    # ~``period`` window before the next boundary.
+    elapsed_in_round = (now - genesis) % period
+    remaining = period - elapsed_in_round
+    if remaining < safety_s:
+        time.sleep(remaining + 0.05)
+        now = time.time()
+    return compute_current_drand_round(now, genesis, period)
 
 
 # ---------------------------------------------------------------------------
@@ -1294,13 +1321,26 @@ class MiningEngine:
         ]
         prompt_lengths = [len(t) for t in prompt_token_lists]
 
+        # Resolve the EOS id set ONCE — both branches need it. Qwen3-Instruct
+        # ships generation_config.eos_token_id = [151645, 151643] AND
+        # pad_token_id = 151643, so trimming on a single eos id misses
+        # rows that stopped on the other.
+        gen_cfg = getattr(self.hf_model, "generation_config", None)
+        _eos_ids = getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
+        if _eos_ids is None:
+            _eos_ids = self.tokenizer.eos_token_id
+        if isinstance(_eos_ids, int):
+            eos_set = {_eos_ids}
+        elif _eos_ids is None:
+            eos_set = set()
+        else:
+            eos_set = {int(e) for e in _eos_ids if e is not None}
+
         # vLLM branch: when self.vllm_model is a vllm.LLM instance use
         # its native batched-with-n API. ~2-3x faster than HF.generate
-        # because of PagedAttention + continuous batching. Tokens it
-        # emits are EOS-terminated by the engine and have no left/right
-        # padding to strip. The HF sketch path downstream still runs on
-        # self.hf_model so GRAIL verifies against the same numerics the
-        # validator uses.
+        # because of PagedAttention + continuous batching. The HF sketch
+        # path downstream still runs on self.hf_model so GRAIL verifies
+        # against the same numerics the validator uses.
         try:
             from vllm import LLM as _VllmLLM, SamplingParams as _SP
             is_vllm = isinstance(self.vllm_model, _VllmLLM)
@@ -1308,6 +1348,90 @@ class MiningEngine:
             is_vllm = False
 
         if is_vllm:
+            # HF p_stop threshold for the regen filter. validator floor is
+            # 0.005 and the validator does the SAME HF forward we do (same
+            # model, same kernels) — no inter-HF drift, so threshold == floor
+            # is correct. Earlier 1.5x margin was over-cautious and rejected
+            # too many borderline rollouts; regen couldn't catch up in 2
+            # attempts, batches fell back to dirty, preverify-skipped.
+            HF_P_STOP_FLOOR = 0.005
+
+            def _process_completion(completion, prompt_ids, prompt_length):
+                """Append EOS for natural terminations; return (entry, vllm_clean).
+
+                vllm_clean means: vLLM thought this finished on a stop token
+                AND the last token is now in eos_set after our re-append.
+                Does NOT guarantee HF preverify will pass — that's checked
+                by ``_compute_hf_p_stops`` downstream.
+                """
+                gen_tokens = list(completion.token_ids)
+                finish = getattr(completion, "finish_reason", None)
+                stop = getattr(completion, "stop_reason", None)
+                # vLLM v1 strips stop tokens from token_ids when it
+                # terminates on an EOS-set id. Validator requires
+                # last_token ∈ eos_set AND p_stop ≥ floor at the
+                # pre-last position — re-append the stop token when
+                # finish_reason=="stop" so natural terminations are
+                # actually submittable.
+                if eos_set and (not gen_tokens or int(gen_tokens[-1]) not in eos_set):
+                    if finish == "stop" and isinstance(stop, int) and stop in eos_set:
+                        gen_tokens.append(stop)
+                vllm_clean = (
+                    finish == "stop"
+                    and bool(gen_tokens)
+                    and int(gen_tokens[-1]) in eos_set
+                )
+                return {
+                    "tokens": prompt_ids + gen_tokens,
+                    "prompt_length": prompt_length,
+                }, vllm_clean
+
+            def _hf_classify(completions, prompt_ids, prompt_length,
+                             k_idx, clean_results, dirty_results):
+                """Run vLLM-gate + HF p_stop classification on completions
+                and bucket into clean_results[k_idx] / dirty_results[k_idx].
+
+                Only candidates that pass BOTH vLLM gates (finish_reason=="stop"
+                + EOS last token) AND HF p_stop >= HF_P_STOP_FLOOR end up in
+                clean. The rest go to dirty for the regen loop. Avoids
+                spending an HF forward on vLLM-already-dirty rollouts.
+                """
+                vllm_clean_entries: list[dict] = []
+                for completion in completions:
+                    entry, vllm_clean = _process_completion(
+                        completion, prompt_ids, prompt_length,
+                    )
+                    if vllm_clean:
+                        vllm_clean_entries.append(entry)
+                    else:
+                        dirty_results[k_idx].append(entry)
+                if not vllm_clean_entries:
+                    return
+                t_hf = time.time()
+                try:
+                    hf_p_stops = self._compute_hf_p_stops(
+                        vllm_clean_entries, eos_set,
+                    )
+                except Exception:
+                    logger.exception(
+                        "HF p_stop check failed; treating vLLM-clean as clean",
+                    )
+                    clean_results[k_idx].extend(vllm_clean_entries)
+                    return
+                hf_clean_count = 0
+                for entry, p in zip(vllm_clean_entries, hf_p_stops):
+                    if p >= HF_P_STOP_FLOOR:
+                        clean_results[k_idx].append(entry)
+                        hf_clean_count += 1
+                    else:
+                        dirty_results[k_idx].append(entry)
+                logger.info(
+                    "HF p_stop check k=%d: %d/%d kept (took %.1fs) p_stops=%s",
+                    k_idx, hf_clean_count, len(vllm_clean_entries),
+                    time.time() - t_hf,
+                    [round(p, 4) for p in hf_p_stops],
+                )
+
             sampling = _SP(
                 n=n_rollouts,
                 temperature=T_PROTO,
@@ -1323,20 +1447,82 @@ class MiningEngine:
             outputs = self.vllm_model.generate(
                 vllm_prompts, sampling, use_tqdm=False,
             )
-            results: list[list[dict]] = [[] for _ in range(K)]
+            # Two buckets per prompt: clean (HF p_stop ≥ HF_P_STOP_FLOOR AND
+            # ends with EOS) and dirty (everything else). vLLM-clean alone is
+            # insufficient because vLLM↔HF drift on FA2 produces bimodal
+            # p_stops at HF (some vLLM-clean rollouts have HF p_stop ≈ 0).
+            # ``_hf_classify`` runs the HF forward once per completion set
+            # and re-buckets accordingly. Validator only checks submitted
+            # rollouts; how the miner produced them (rejection sampling) is
+            # unconstrained.
+            clean_results: list[list[dict]] = [[] for _ in range(K)]
+            dirty_results: list[list[dict]] = [[] for _ in range(K)]
             for k in range(K):
                 req_out = outputs[k]
                 prompt_ids = list(req_out.prompt_token_ids)
                 prompt_length = len(prompt_ids)
-                for completion in req_out.outputs:
-                    gen_tokens = list(completion.token_ids)
-                    results[k].append({
-                        "tokens": prompt_ids + gen_tokens,
-                        "prompt_length": prompt_length,
-                    })
-                # vLLM may return fewer than n_rollouts on stop_eos races —
-                # pad with the last completion if any are missing.
-                while len(results[k]) < n_rollouts and req_out.outputs:
+                _hf_classify(
+                    req_out.outputs, prompt_ids, prompt_length,
+                    k, clean_results, dirty_results,
+                )
+
+            # Regen loop: for each prompt still short of n_rollouts clean
+            # rollouts, ask vLLM for (missing * 2) more samples and keep
+            # only the HF-clean ones. Cap at 2 attempts to bound latency at
+            # ~3x baseline gen cost in the worst case.
+            MAX_REGEN_ATTEMPTS = 2
+            regen_oversample = 2
+            for attempt in range(MAX_REGEN_ATTEMPTS):
+                short_indices = [
+                    k for k in range(K) if len(clean_results[k]) < n_rollouts
+                ]
+                if not short_indices:
+                    break
+                t_regen_start = time.time()
+                for k_idx in short_indices:
+                    needed = n_rollouts - len(clean_results[k_idx])
+                    if needed <= 0:
+                        continue
+                    regen_n = max(1, needed * regen_oversample)
+                    regen_sampling = _SP(
+                        n=regen_n,
+                        temperature=T_PROTO,
+                        top_p=TOP_P_PROTO,
+                        top_k=TOP_K_PROTO,
+                        max_tokens=max_new_tokens,
+                    )
+                    regen_outputs = self.vllm_model.generate(
+                        [vllm_prompts[k_idx]], regen_sampling, use_tqdm=False,
+                    )
+                    if not regen_outputs:
+                        continue
+                    regen_req = regen_outputs[0]
+                    prompt_ids = list(regen_req.prompt_token_ids)
+                    prompt_length = len(prompt_ids)
+                    _hf_classify(
+                        regen_req.outputs, prompt_ids, prompt_length,
+                        k_idx, clean_results, dirty_results,
+                    )
+                logger.info(
+                    "regen attempt %d/%d: %d prompts short, took %.1fs "
+                    "(clean counts: %s)",
+                    attempt + 1, MAX_REGEN_ATTEMPTS, len(short_indices),
+                    time.time() - t_regen_start,
+                    [len(clean_results[k]) for k in range(K)],
+                )
+
+            # Final assembly: fill any remaining slots with dirty rollouts
+            # (better to submit and let preverify reject than to skip the
+            # batch entirely — preverify-skip wastes the gen cost; sometimes
+            # the validator's bf16 numerics put a borderline dirty rollout
+            # back above the floor).
+            results: list[list[dict]] = [[] for _ in range(K)]
+            for k in range(K):
+                results[k].extend(clean_results[k][:n_rollouts])
+                while len(results[k]) < n_rollouts and dirty_results[k]:
+                    results[k].append(dirty_results[k].pop(0))
+                # Last resort: duplicate the last entry if everything was empty.
+                while len(results[k]) < n_rollouts and results[k]:
                     results[k].append(results[k][-1])
             return results
 
@@ -1371,21 +1557,8 @@ class MiningEngine:
             )
 
         # Trim at first EOS so trailing batch-pad EOS tokens (HF pads finished
-        # rows with pad_token_id) don't leak into the submission. Qwen3-Instruct
-        # generation_config lists TWO EOS ids (<|im_end|>=151645 AND
-        # <|endoftext|>=151643) and pad_token_id == 151643, so trimming on a
-        # single tokenizer.eos_token_id misses rows that stopped on the other
-        # one and leaves padded EOS tails that trip validator has_eos_padding.
-        gen_cfg = getattr(self.hf_model, "generation_config", None)
-        eos_ids = getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
-        if eos_ids is None:
-            eos_ids = self.tokenizer.eos_token_id
-        if isinstance(eos_ids, int):
-            eos_set = {eos_ids}
-        elif eos_ids is None:
-            eos_set = set()
-        else:
-            eos_set = {int(e) for e in eos_ids if e is not None}
+        # rows with pad_token_id) don't leak into the submission. eos_set was
+        # hoisted above the vLLM branch so both paths share it.
         results: list[list[dict]] = [[] for _ in range(K)]
         for k in range(K):
             prompt_length = prompt_lengths[k]
@@ -1475,6 +1648,48 @@ class MiningEngine:
                 )
                 continue
 
+            # Pre-flight HASH_DUPLICATE check. A submission is rejected
+            # whole if ANY rollout in it collides with the validator's
+            # accepted hash_set, so even one stale-cached rollout poisons
+            # the entire batch. Check against the hashes scrape_intel
+            # mirrored from R2 windows for this (prompt, ckpt). Hashing
+            # M=8 token sequences locally is ~µs; saves the ~1-5s sketch
+            # + GRAIL forward + network round-trip a guaranteed-loss
+            # submit would burn.
+            #
+            # Dormant on this device until persistence.py also gets the
+            # ``accepted_hashes_for_prompt`` method + the SQL table. The
+            # ``hasattr`` guard keeps log noise low (no per-submit
+            # AttributeError tracebacks) and the check becomes a no-op
+            # until the cache side lands.
+            if (
+                self._cache is not None
+                and self._cache.enabled
+                and hasattr(self._cache, "accepted_hashes_for_prompt")
+            ):
+                try:
+                    accepted_set = await asyncio.to_thread(
+                        self._cache.accepted_hashes_for_prompt,
+                        batch.prompt_idx, local_hash,
+                    )
+                except Exception:
+                    logger.exception(
+                        "accepted_hashes lookup failed prompt=%d", batch.prompt_idx,
+                    )
+                    accepted_set = set()
+                if accepted_set:
+                    collided = sum(
+                        1 for gen in batch.generations
+                        if compute_rollout_hash(gen["tokens"]).hex() in accepted_set
+                    )
+                    if collided > 0:
+                        logger.info(
+                            "dropping pregen prompt=%d "
+                            "(%d/%d rollouts collide with accepted hash_set)",
+                            batch.prompt_idx, collided, len(batch.generations),
+                        )
+                        continue
+
             t_sketch_start = time.time()
             try:
                 # Batched sketch: one GRAIL forward over all M
@@ -1482,7 +1697,7 @@ class MiningEngine:
                 # ``sketch`` component of our submit time from ~5 s
                 # to ~1 s, which is the difference between landing
                 # before vs after the validator's seal under load.
-                commits = self._build_grail_commits_batched(
+                commits, p_stops = self._build_grail_commits_batched(
                     batch.generations, randomness,
                 )
                 rollout_submissions = [
@@ -1497,6 +1712,36 @@ class MiningEngine:
                 ]
             except Exception:
                 logger.exception("sketching failed prompt=%d", batch.prompt_idx)
+                continue
+
+            # Preverify: check every cheap validator gate locally and
+            # skip the batch if any rollout would fail. Stops the
+            # quota-bleed pattern where bad_termination POSTs burn
+            # one of our 8 per-window slots each, leaving no room
+            # for clean batches that arrive later in the window.
+            # Configurable floor via RELIQUARY_PSTOP_MIN; 0.005 is
+            # half the validator's MIN_EOS_PROBABILITY=0.01 — looser
+            # than safe-margin to let cross-stack variance through.
+            try:
+                p_stop_floor = float(
+                    os.environ.get("RELIQUARY_PSTOP_MIN", "0.005")
+                )
+            except ValueError:
+                p_stop_floor = 0.005
+            preverify_fail = self._preverify_batch(
+                rollout_submissions, p_stops, p_stop_floor,
+            )
+            if preverify_fail:
+                self._prescreen_dud_set.add(batch.prompt_idx)
+                # Mark Supabase row consumed so the next cache refresh
+                # doesn't re-hydrate this dud — without this the batch
+                # cycles forever between in-memory drop and cache pull.
+                self._persist_consumed(batch.prompt_idx, batch.local_hash)
+                logger.info(
+                    "skip submit prompt=%d (preverify=%s p_stops=%s)",
+                    batch.prompt_idx, preverify_fail,
+                    [round(p, 4) for p in p_stops],
+                )
                 continue
             merkle_root = _compute_merkle_root(rollout_submissions)
 
@@ -1533,9 +1778,17 @@ class MiningEngine:
             # round-trip. Re-queue the batch for the next OPEN, but
             # cap attempts so we don't infinite-spin on a batch the
             # validator never accepts within the hard cap.
+            #
+            # The state field check is required even when window_n
+            # and randomness still match: the validator transitions
+            # OPEN -> TRAINING -> PUBLISHING within a single window_n
+            # at the seal trigger. Without this guard the POST lands
+            # in TRAINING and earns window_not_active.
+            from reliquary.protocol.submission import WindowState as _WS
             latest = self._latest_state
             if (
                 latest is None
+                or latest.state != _WS.OPEN
                 or latest.window_n != state.window_n
                 or not latest.randomness
                 or latest.randomness != randomness
@@ -1585,6 +1838,19 @@ class MiningEngine:
                 self._submitted_this_window.add(batch.prompt_idx)
                 self._submission_count_this_window += 1
                 any_fired = True
+                # If the validator says we're rate-limited, our local
+                # counter is behind the validator's — usually because
+                # earlier POSTs timed out client-side but were still
+                # counted server-side. Sync forward immediately so we
+                # stop firing into a closed quota window. The local
+                # counter is reset to 0 at every window roll.
+                reason_value = (
+                    resp.reason.value if hasattr(resp.reason, "value") else resp.reason
+                )
+                if not resp.accepted and reason_value == "rate_limited":
+                    self._submission_count_this_window = (
+                        MAX_SUBMISSIONS_PER_HOTKEY_PER_WINDOW
+                    )
                 logger.info(
                     "submitted window=%d prompt=%d sigma=%.3f sketch=%.2fs post=%.2fs "
                     "accepted=%s reason=%s",
@@ -1699,6 +1965,8 @@ class MiningEngine:
         already = {b.prompt_idx for b in self._pregen_queue}
         for pb in cached_batches:
             if pb.prompt_idx in already:
+                continue
+            if pb.prompt_idx in self._prescreen_dud_set:
                 continue
             if len(self._pregen_queue) >= self._pregen_queue.maxlen:
                 break
@@ -2115,13 +2383,133 @@ class MiningEngine:
         block_hash = await chain.get_block_hash(subtensor, window_start)
         return chain.compute_window_randomness(block_hash)
 
+    def _preverify_batch(
+        self,
+        rollout_submissions: list,
+        p_stops: list[float],
+        p_stop_floor: float,
+    ) -> str:
+        """Return empty string if every rollout passes the per-rollout
+        validator gates (termination + cap-truncation + eos-padding),
+        else a short failure reason for logging.
+
+        Mirrors the validator's verify_termination + is_cap_truncation
+        + has_eos_padding gates exactly so we never reject a batch
+        the validator would accept and never accept a batch the
+        validator would reject (per-rollout — the batch-level gates
+        like frontier band are already enforced upstream in pregen).
+        """
+        gen_cfg = getattr(self.hf_model, "generation_config", None)
+        eos_ids = (
+            getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
+        )
+        if eos_ids is None:
+            eos_ids = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_ids is None:
+            return ""
+        if isinstance(eos_ids, int):
+            eos_set = {int(eos_ids)}
+        else:
+            eos_set = {int(e) for e in eos_ids if e is not None}
+
+        for i, rs in enumerate(rollout_submissions):
+            commit = rs.commit
+            tokens = commit.get("tokens") or []
+            meta = commit.get("rollout", {}) or {}
+            prompt_length = int(meta.get("prompt_length", 0))
+            completion_length = int(meta.get("completion_length", 0))
+            total = prompt_length + completion_length
+            if total < 2 or completion_length <= 0 or not tokens:
+                return f"empty(idx={i})"
+            last_tok = int(tokens[-1])
+            cap_hit = total >= MAX_NEW_TOKENS_PROTOCOL_CAP
+            p_stop = float(p_stops[i]) if i < len(p_stops) else 0.0
+            # Validator's is_cap_truncation: any cap-hit rollout NOT
+            # ending in EOS with p_stop >= MIN_EOS_PROBABILITY is
+            # counted as truncation; with MAX_TRUNCATED_PER_SUBMISSION=0
+            # any single truncation kills the batch.
+            if cap_hit:
+                if last_tok not in eos_set or p_stop < p_stop_floor:
+                    return f"cap_truncation(idx={i}, p_stop={p_stop:.4f})"
+            else:
+                # Validator's verify_termination Path 2: not cap hit
+                # requires last token in EOS set AND p_stop above floor.
+                if last_tok not in eos_set:
+                    return f"non_eos_last(idx={i}, last={last_tok})"
+                if p_stop < p_stop_floor:
+                    return f"low_p_stop(idx={i}, p_stop={p_stop:.4f}, floor={p_stop_floor:.4f})"
+            # has_eos_padding: completion must contain EXACTLY one EOS,
+            # at the final position. Multiple EOS or EOS-not-last is
+            # rejected.
+            completion = tokens[prompt_length: prompt_length + completion_length]
+            eos_positions = [
+                j for j, tok in enumerate(completion) if int(tok) in eos_set
+            ]
+            if eos_positions and (
+                len(eos_positions) > 1
+                or eos_positions[0] != len(completion) - 1
+            ):
+                return (
+                    f"eos_padding(idx={i}, n_eos={len(eos_positions)}, "
+                    f"first_pos={eos_positions[0]}, comp_len={len(completion)})"
+                )
+        return ""
+
     def _build_grail_commit(self, generation: dict, randomness: str) -> dict:
         """Single-rollout convenience wrapper around the batched path."""
-        return self._build_grail_commits_batched([generation], randomness)[0]
+        commits, _ = self._build_grail_commits_batched([generation], randomness)
+        return commits[0]
+
+    def _compute_hf_p_stops(
+        self, generations: list[dict], eos_set: set[int],
+    ) -> list[float]:
+        """Run HF forward on rollout token sequences and return per-rollout
+        p_stop. p_stop[i] = sum of softmax(logits at position n_i-2)[eos_ids].
+
+        Same formula the validator uses in _gpu_p_stop and our preverify uses
+        downstream. Called from the regen filter inside ``_generate_full`` so
+        we can drop vLLM-clean rollouts that HF disagrees on (the bimodal
+        drift case where vLLM samples EOS at positions HF treats as p≈0) and
+        regenerate via vLLM. Without this, regen-on-cap-truncation only
+        catches half of the failures.
+        """
+        import torch
+        if not generations or not eos_set:
+            return [0.0] * len(generations)
+
+        pad_id = self.tokenizer.pad_token_id
+        token_lists = [g["tokens"] for g in generations]
+        max_len = max(len(t) for t in token_lists)
+
+        flat_input: list[list[int]] = []
+        for tokens in token_lists:
+            pad_count = max_len - len(tokens)
+            flat_input.append(tokens + [pad_id] * pad_count)
+
+        device = f"cuda:{self.proof_gpu}"
+        input_tensor = torch.tensor(flat_input, device=device)
+        with torch.no_grad():
+            out = self.hf_model(input_ids=input_tensor)
+        logits_batch = out.logits  # [batch, max_len, vocab]
+
+        eos_tensor = torch.tensor(
+            sorted(eos_set), device=device, dtype=torch.long,
+        )
+        p_stops: list[float] = []
+        for i, tokens in enumerate(token_lists):
+            n = len(tokens)
+            if n < 2:
+                p_stops.append(0.0)
+                continue
+            probs = torch.softmax(logits_batch[i, n - 2, :].float(), dim=-1)
+            p_stop = probs.index_select(-1, eos_tensor).sum().item()
+            p_stops.append(float(p_stop))
+
+        return p_stops
 
     def _build_grail_commits_batched(
         self, generations: list[dict], randomness: str,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], list[float]]:
         """Build M GRAIL commits in ONE forward pass.
 
         Previously each of M=8 rollouts ran its own batch=1 forward —
@@ -2146,7 +2534,7 @@ class MiningEngine:
         from reliquary.shared.forward import forward_single_layer
 
         if not generations:
-            return []
+            return [], []
 
         pad_id = self.tokenizer.pad_token_id
         token_lists = [g["tokens"] for g in generations]
@@ -2170,7 +2558,35 @@ class MiningEngine:
         r_vec = self._verifier.generate_r_vec(randomness)
         model_name: str = getattr(self.hf_model, "name_or_path", "unknown")
 
+        # Resolve EOS ids once for the inline p_stop computation per
+        # rollout — same logic the validator uses in _gpu_p_stop, but
+        # against our HF forward instead of the validator's. We mirror
+        # the validator's check so preverify can reject rollouts that
+        # would fail termination at the validator BEFORE we burn
+        # quota with a doomed POST.
+        import torch
+        gen_cfg = getattr(self.hf_model, "generation_config", None)
+        eos_ids_cfg = (
+            getattr(gen_cfg, "eos_token_id", None) if gen_cfg is not None else None
+        )
+        if eos_ids_cfg is None:
+            eos_ids_cfg = getattr(self.tokenizer, "eos_token_id", None)
+        if isinstance(eos_ids_cfg, int):
+            eos_id_list = [int(eos_ids_cfg)]
+        elif eos_ids_cfg is None:
+            eos_id_list = []
+        else:
+            eos_id_list = [int(e) for e in eos_ids_cfg if e is not None]
+        eos_id_tensor = (
+            torch.tensor(
+                eos_id_list, device=logits_batch.device, dtype=torch.long,
+            )
+            if eos_id_list
+            else None
+        )
+
         commits: list[dict] = []
+        p_stops: list[float] = []
         for i, tokens in enumerate(token_lists):
             n_tokens = len(tokens)
             prompt_length = prompt_lengths[i]
@@ -2182,12 +2598,53 @@ class MiningEngine:
             h = hidden_states_batch[i, :n_tokens, :]
             commitments = self._verifier.create_commitments_batch(h, r_vec)
 
-            log_probs = torch.log_softmax(
-                logits_batch[i, :n_tokens, :].float(), dim=-1,
+            # Memory-efficient log_softmax: we only need the log-prob
+            # of ONE token per position (the actually-sampled token at
+            # the next position), but a naive ``torch.log_softmax(...)``
+            # over [n_tokens, vocab=151936] in float32 allocates
+            # ~5 GiB per rollout — sufficient to OOM the GPU when
+            # vLLM is co-resident. The identity
+            #
+            #     log_softmax(x)[t] = x[t] - logsumexp(x, dim=-1)
+            #
+            # lets us compute only the n_tokens scalars we need:
+            # gather the target-token logits along the vocab dim,
+            # logsumexp per row, subtract. Output is shape [n_tokens]
+            # instead of [n_tokens, vocab] — ~150k× smaller.
+            logits_i = logits_batch[i, :n_tokens, :].float()
+            # Target token IDs at positions 1..n_tokens (predictions
+            # of logits rows 0..n_tokens-1). We only need positions
+            # prompt_length..n_tokens for the completion logprobs.
+            tokens_t = torch.tensor(tokens, device=logits_i.device, dtype=torch.long)
+            # Per-row logsumexp normaliser.
+            log_norm = torch.logsumexp(logits_i, dim=-1)  # [n_tokens]
+            # Gather the logit for each row's "next token" — i.e.
+            # for row r the logit at index tokens[r+1]. We compute it
+            # only for r in [prompt_length-1, n_tokens-1], which is
+            # exactly the range used downstream.
+            row_idx = torch.arange(
+                max(prompt_length - 1, 0), n_tokens - 1,
+                device=logits_i.device,
             )
-            token_logprobs: list[float] = []
-            for j in range(prompt_length, n_tokens):
-                token_logprobs.append(log_probs[j - 1, tokens[j]].item())
+            tok_idx = tokens_t[row_idx + 1]
+            gathered = logits_i[row_idx, tok_idx]  # [completion_length]
+            row_log_probs = gathered - log_norm[row_idx]
+            token_logprobs: list[float] = row_log_probs.detach().cpu().tolist()
+
+            # p_stop: raw softmax probability of any EOS token at the
+            # position predicting the LAST token. Same formula as
+            # validator's _gpu_p_stop. Computed inline from the
+            # already-loaded logits_batch — zero extra GPU cost.
+            if eos_id_tensor is not None and n_tokens >= 2:
+                probs_last = torch.softmax(
+                    logits_batch[i, n_tokens - 2, :].float(), dim=-1,
+                )
+                p_stop = float(
+                    probs_last.index_select(-1, eos_id_tensor).sum().item()
+                )
+            else:
+                p_stop = 0.0
+            p_stops.append(p_stop)
 
             signature = sign_commit_binding(
                 tokens, randomness, model_name, LAYER_INDEX,
@@ -2209,4 +2666,4 @@ class MiningEngine:
                     "token_logprobs": token_logprobs,
                 },
             })
-        return commits
+        return commits, p_stops

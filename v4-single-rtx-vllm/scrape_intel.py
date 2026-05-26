@@ -16,12 +16,19 @@ This is the safe complement to ``prep_dataset.py``:
   — we'd need to re-generate locally on the same prompt to get unique
   rollouts).
 
-R2 archive caveat: it does NOT tag the ckpt revision active at each
-window. We assume all scraped windows used the validator's
-currently-published ckpt. This is true for windows in the last
-``CHECKPOINT_PUBLISH_INTERVAL_WINDOWS`` (10) — beyond that, you risk
-poisoning the cache with intel that no longer matches the active
-policy. The default lookback (10) stays inside that safe band.
+R2 archive caveat: the legacy code used to assume all scraped windows
+used the validator's currently-published ckpt. The v2.3+ archive now
+stamps each batch entry with ``claimed_checkpoint_hash`` (the ckpt the
+miner cited at submission time, which is what the validator scored
+against). We use that per-row when present and fall back to the
+validator's current ckpt for legacy rows.
+
+Hash persistence: every accepted rollout exposes a ``hash`` field —
+the per-rollout sha256 the validator's hash_set keys on. We mirror
+those into the ``accepted_rollout_hashes`` table so the miner can
+pre-flight a freshly-generated rollout against the validator's
+dedup set BEFORE paying for submission — a hit means HASH_DUPLICATE
+is guaranteed, so the miner re-samples with a fresh seed instead.
 
 Usage:
     cd /root/reliquary && source scripts/.env
@@ -136,7 +143,7 @@ def main() -> int:
         logger.error("Supabase cache disabled — check RELIQUARY_SUPABASE_URL/KEY")
         return 2
 
-    def do_pass() -> tuple[int, int, int]:
+    def do_pass() -> tuple[int, int, int, int]:
         # If neither override is set, re-fetch validator state per pass so
         # both the end window AND ckpt_hash track ckpt advances naturally.
         pass_ckpt = ckpt_hash
@@ -147,7 +154,7 @@ def main() -> int:
                 _, revision, _, cur = _fetch_validator_ckpt(args.validator_url)
             except Exception as e:
                 logger.warning("validator state failed: %s", e)
-                return 0, 0, 0
+                return 0, 0, 0, 0
             if args.until_window is not None:
                 end = int(args.until_window)
             else:
@@ -164,6 +171,7 @@ def main() -> int:
 
         added_good = 0
         added_oof = 0
+        added_hashes = 0
         windows_seen = 0
         for n in range(start, end + 1):
             w = _fetch_window(n)
@@ -174,11 +182,18 @@ def main() -> int:
             windows_seen += 1
             data = (w or {}).get("data") or {}
             batch = data.get("batch") or []
+            hash_rows_this_window: list[dict] = []
             for item in batch:
                 pid = item.get("prompt_idx")
                 rollouts = item.get("rollouts") or []
                 if pid is None or not rollouts:
                     continue
+                # Per-row ckpt tagging — the validator stamps each batch
+                # entry with the ckpt the miner cited at submission time.
+                # That is the ckpt the rewards were scored under, which
+                # is what we want to key the outcome on. Fall back to the
+                # current validator ckpt for legacy rows missing the field.
+                row_ckpt = item.get("claimed_checkpoint_hash") or pass_ckpt
                 rewards = [float(r.get("reward", 0.0)) for r in rollouts]
                 k = sum(1 for r in rewards if r >= 0.5)
                 mean = sum(rewards) / max(1, len(rewards))
@@ -186,11 +201,26 @@ def main() -> int:
                 sigma = var ** 0.5
                 cache.upsert_outcome(PromptOutcome(
                     prompt_idx=int(pid),
-                    checkpoint_hash=pass_ckpt,
+                    checkpoint_hash=row_ckpt,
                     k=int(k), sigma=float(sigma), status="good",
                     miner_hotkey=item.get("hotkey"),
                 ))
                 added_good += 1
+                # Mirror per-rollout hashes for the miner's pre-flight
+                # dedup check (skip rollouts missing the field — legacy).
+                for r in rollouts:
+                    h = r.get("hash")
+                    if not h:
+                        continue
+                    hash_rows_this_window.append({
+                        "rollout_hash": h,
+                        "prompt_idx": int(pid),
+                        "checkpoint_hash": row_ckpt,
+                        "window_n": int(n),
+                        "miner_hotkey": item.get("hotkey"),
+                    })
+            if hash_rows_this_window:
+                added_hashes += cache.upsert_accepted_hashes(hash_rows_this_window)
             if args.include_rejected:
                 rej = data.get("rejected") or []
                 for item in rej:
@@ -203,25 +233,26 @@ def main() -> int:
                     # issues not prompt-quality issues.
                     if reason not in ("out_of_zone", "reward_distribution"):
                         continue
+                    row_ckpt = item.get("claimed_checkpoint_hash") or pass_ckpt
                     cache.upsert_outcome(PromptOutcome(
                         prompt_idx=int(pid),
-                        checkpoint_hash=pass_ckpt,
+                        checkpoint_hash=row_ckpt,
                         k=0, sigma=0.0, status="oof",
                         miner_hotkey=item.get("hotkey"),
                     ))
                     added_oof += 1
             logger.info(
-                "window %d: batch=%d cumulative_good=%d cumulative_oof=%d",
-                n, len(batch), added_good, added_oof,
+                "window %d: batch=%d cumulative_good=%d cumulative_oof=%d hashes=%d",
+                n, len(batch), added_good, added_oof, added_hashes,
             )
-        return windows_seen, added_good, added_oof
+        return windows_seen, added_good, added_oof, added_hashes
 
     while True:
         t0 = time.time()
-        ws, g, o = do_pass()
+        ws, g, o, h = do_pass()
         logger.info(
-            "pass done windows=%d good=%d oof=%d elapsed=%.1fs",
-            ws, g, o, time.time() - t0,
+            "pass done windows=%d good=%d oof=%d hashes=%d elapsed=%.1fs",
+            ws, g, o, h, time.time() - t0,
         )
         if args.watch <= 0:
             return 0

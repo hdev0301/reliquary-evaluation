@@ -223,6 +223,7 @@ def mine(
             # exactly the revision the validator is scoring against — no
             # need to plumb repo_id / revision separately.
             from vllm import LLM as VllmLLM
+            from reliquary.miner.eos_guard import VllmV1EosGuard
             try:
                 vllm_model = VllmLLM(
                     model=initial_path,
@@ -231,8 +232,9 @@ def mine(
                     max_model_len=max(max_new_tokens + 2048, 4096),
                     enforce_eager=False,
                     disable_log_stats=True,
+                    logits_processors=[VllmV1EosGuard],
                 )
-                logger.info("vLLM gen engine loaded (gpu_mem_util=0.50)")
+                logger.info("vLLM gen engine loaded with EosGuard (gpu_mem_util=0.50)")
             except Exception:
                 logger.exception("vLLM init failed; falling back to HF for gen")
                 vllm_model = AutoModelForCausalLM.from_pretrained(

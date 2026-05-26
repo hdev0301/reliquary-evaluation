@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS pregen_batches (
     k                INTEGER NOT NULL,
     rollouts         JSONB NOT NULL,
     miner_hotkey     TEXT,
+    tier             TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     consumed_at      TIMESTAMPTZ,
     UNIQUE (prompt_idx, checkpoint_hash)
@@ -66,6 +67,27 @@ CREATE TABLE IF NOT EXISTS pregen_batches (
 CREATE INDEX IF NOT EXISTS idx_pregen_unconsumed_ckpt
     ON pregen_batches (checkpoint_hash)
     WHERE consumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pregen_tier
+    ON pregen_batches (checkpoint_hash, tier)
+    WHERE consumed_at IS NULL;
+
+-- Validator-accepted rollout hashes scraped from R2 archive windows.
+-- Used as a pre-flight bloom filter: before submitting a freshly-generated
+-- batch, hash each rollout and drop any that already appear here — those
+-- would reject as HASH_DUPLICATE at the validator. ``rollout_hash`` is
+-- the hex string of the validator's per-rollout hash (matches the
+-- ``hash`` field in R2 window batch entries).
+CREATE TABLE IF NOT EXISTS accepted_rollout_hashes (
+    rollout_hash     TEXT NOT NULL,
+    prompt_idx       BIGINT NOT NULL,
+    checkpoint_hash  TEXT NOT NULL,
+    window_n         BIGINT,
+    miner_hotkey     TEXT,
+    first_seen       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (rollout_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_arh_prompt_ckpt
+    ON accepted_rollout_hashes (prompt_idx, checkpoint_hash);
 """
 
 
@@ -90,6 +112,12 @@ class PersistedBatch:
     k: int
     rollouts: list[dict]  # list of {tokens: [int], prompt_length: int, reward: float}
     miner_hotkey: Optional[str] = None
+    # Difficulty tier — set by prep when the batch is saved. Lets the
+    # consumer (engine) draw a diverse mix per submission window:
+    #   "stable"      — high cross-ckpt confidence (score ≥ skip-prescreen)
+    #   "proven"      — landed good ≥1 time historically
+    #   "exploratory" — no prior history (random pick or first observation)
+    tier: Optional[str] = None
 
 
 class SupabaseCache:
@@ -166,6 +194,148 @@ class SupabaseCache:
         except Exception:
             logger.exception("upsert_outcome failed prompt=%d", o.prompt_idx)
 
+    def prompt_stats_across_ckpts(
+        self,
+        since_iso: str | None = None,
+        exclude_ckpts: set[str] | None = None,
+    ) -> dict[int, dict]:
+        """Return per-prompt aggregate stats across all ckpts.
+
+        ``{prompt_idx: {'good': int, 'dud': int, 'oof': int,
+                         'mean_k': float, 'observations': int,
+                         'good_ts': list[str], 'bad_ts': list[str]}}``
+
+        ``good_ts`` / ``bad_ts`` are ISO timestamps (the row's
+        ``last_seen``) used by recency-weighted scoring downstream — newer
+        observations count more than old ones.
+
+        Args:
+            since_iso: drop rows with ``last_seen < since_iso``. After a
+                ckpt reset, set this to the reset timestamp so poisoned
+                pre-reset rows don't pollute the priority queue.
+            exclude_ckpts: drop rows whose ``checkpoint_hash`` is in this
+                set. Use for surgical removal of specific bad ckpts when a
+                time-based cutoff would over-exclude.
+        """
+        if not self.enabled:
+            return {}
+        try:
+            stats: dict[int, dict] = {}
+            page_size = 1000
+            start = 0
+            excl_list = list(exclude_ckpts) if exclude_ckpts else None
+            while True:
+                q = (
+                    self._client.table("prompt_outcomes")
+                    .select("prompt_idx,status,k,last_seen,checkpoint_hash")
+                )
+                if since_iso:
+                    q = q.gte("last_seen", since_iso)
+                if excl_list:
+                    q = q.not_.in_("checkpoint_hash", excl_list)
+                res = q.range(start, start + page_size - 1).execute()
+                rows = res.data or []
+                if not rows:
+                    break
+                for r in rows:
+                    pid = int(r["prompt_idx"])
+                    s = stats.setdefault(pid, {
+                        "good": 0, "dud": 0, "oof": 0,
+                        "_k_sum": 0, "observations": 0,
+                        "good_ts": [], "bad_ts": [],
+                    })
+                    status = r.get("status") or ""
+                    ts = r.get("last_seen")
+                    if status == "good":
+                        s["good"] += 1
+                        if ts:
+                            s["good_ts"].append(ts)
+                    elif status in ("dud", "oof"):
+                        s[status] += 1
+                        if ts:
+                            s["bad_ts"].append(ts)
+                    s["_k_sum"] += int(r.get("k") or 0)
+                    s["observations"] += 1
+                if len(rows) < page_size:
+                    break
+                start += page_size
+            for pid, s in stats.items():
+                s["mean_k"] = s["_k_sum"] / max(1, s["observations"])
+                del s["_k_sum"]
+            return stats
+        except Exception:
+            logger.exception("prompt_stats_across_ckpts failed")
+            return {}
+
+    def fresh_good_pids(
+        self, checkpoint_hash: str, since_iso: str | None = None,
+    ) -> list[tuple[int, str]]:
+        """Return ``[(prompt_idx, last_seen)]`` for ``status='good'`` rows
+        under the current ckpt newer than ``since_iso``. Used by the prep
+        picker to mid-run-refresh its priority queue with intel that other
+        miners just produced (via scrape_intel) under the live ckpt.
+        """
+        if not self.enabled:
+            return []
+        try:
+            q = (
+                self._client.table("prompt_outcomes")
+                .select("prompt_idx,last_seen")
+                .eq("checkpoint_hash", checkpoint_hash)
+                .eq("status", "good")
+            )
+            if since_iso:
+                q = q.gt("last_seen", since_iso)
+            res = q.execute()
+            return [
+                (int(r["prompt_idx"]), r["last_seen"])
+                for r in (res.data or [])
+            ]
+        except Exception:
+            logger.exception(
+                "fresh_good_pids failed ckpt=%s since=%s",
+                checkpoint_hash, since_iso,
+            )
+            return []
+
+    def good_counts_across_ckpts(self) -> dict[int, int]:
+        """Return ``{prompt_idx: count_of_distinct_ckpts_where_good}``.
+
+        Prompts that landed `status='good'` across many ckpts are
+        structurally mid-difficulty for this base model+env, regardless of
+        which ckpt is live now. Used by the prep picker to prime the
+        priority queue ahead of random sampling. Paginates the Supabase
+        select since the REST endpoint caps at 1000 rows per call.
+        """
+        if not self.enabled:
+            return {}
+        try:
+            seen: dict[int, set[str]] = {}
+            page_size = 1000
+            start = 0
+            while True:
+                res = (
+                    self._client.table("prompt_outcomes")
+                    .select("prompt_idx,checkpoint_hash")
+                    .eq("status", "good")
+                    .range(start, start + page_size - 1)
+                    .execute()
+                )
+                rows = res.data or []
+                if not rows:
+                    break
+                for r in rows:
+                    seen.setdefault(int(r["prompt_idx"]), set()).add(
+                        r["checkpoint_hash"]
+                    )
+                if len(rows) < page_size:
+                    break
+                start += page_size
+            return {pid: len(ckpts) for pid, ckpts in seen.items()}
+        except Exception:
+            logger.exception("good_counts_across_ckpts failed")
+            return {}
+
     def load_outcomes(self, checkpoint_hash: str) -> list[PromptOutcome]:
         if not self.enabled:
             return []
@@ -194,6 +364,79 @@ class SupabaseCache:
             return []
 
     # ------------------------------------------------------------------
+    # accepted_rollout_hashes
+    # ------------------------------------------------------------------
+    def upsert_accepted_hashes(self, rows: list[dict]) -> int:
+        """Bulk-insert validator-accepted rollout hashes from R2 windows.
+
+        ``rows`` is a list of dicts with keys:
+            rollout_hash (str, hex), prompt_idx (int),
+            checkpoint_hash (str), window_n (int|None),
+            miner_hotkey (str|None)
+
+        Returns the number of rows submitted (upsert ignores collisions
+        on ``rollout_hash`` so re-runs are idempotent).
+        """
+        if not self.enabled or not rows:
+            return 0
+        try:
+            cleaned = []
+            for r in rows:
+                h = r.get("rollout_hash")
+                if not h:
+                    continue
+                cleaned.append({
+                    "rollout_hash": str(h),
+                    "prompt_idx": int(r["prompt_idx"]),
+                    "checkpoint_hash": str(r["checkpoint_hash"]),
+                    "window_n": int(r["window_n"]) if r.get("window_n") is not None else None,
+                    "miner_hotkey": r.get("miner_hotkey"),
+                })
+            if not cleaned:
+                return 0
+            (
+                self._client.table("accepted_rollout_hashes")
+                .upsert(cleaned, on_conflict="rollout_hash")
+                .execute()
+            )
+            return len(cleaned)
+        except Exception:
+            logger.exception("upsert_accepted_hashes failed n=%d", len(rows))
+            return 0
+
+    def accepted_hashes_for_prompt(
+        self, prompt_idx: int, checkpoint_hash: str | None = None,
+    ) -> set[str]:
+        """Return the set of hex hashes already accepted for a prompt.
+
+        Pre-flight check: a freshly-generated rollout whose hash is in
+        this set will reject as HASH_DUPLICATE at the validator — drop
+        and re-sample with a different seed before submitting.
+        Scoping to ``checkpoint_hash`` is recommended (rollout hashes
+        only collide within the active hash_set window, which the
+        validator keys per-ckpt). Pass ``None`` to check against all
+        ckpts (paranoid mode).
+        """
+        if not self.enabled:
+            return set()
+        try:
+            q = (
+                self._client.table("accepted_rollout_hashes")
+                .select("rollout_hash")
+                .eq("prompt_idx", int(prompt_idx))
+            )
+            if checkpoint_hash is not None:
+                q = q.eq("checkpoint_hash", checkpoint_hash)
+            res = q.execute()
+            return {r["rollout_hash"] for r in (res.data or [])}
+        except Exception:
+            logger.exception(
+                "accepted_hashes_for_prompt failed prompt=%d ckpt=%s",
+                prompt_idx, checkpoint_hash,
+            )
+            return set()
+
+    # ------------------------------------------------------------------
     # pregen_batches
     # ------------------------------------------------------------------
     def save_batch(self, b: PersistedBatch) -> None:
@@ -208,6 +451,7 @@ class SupabaseCache:
                 "k": int(b.k),
                 "rollouts": b.rollouts,
                 "miner_hotkey": b.miner_hotkey or self.miner_hotkey,
+                "tier": b.tier,
                 "consumed_at": None,
             }
             self._client.table("pregen_batches").upsert(
@@ -236,6 +480,7 @@ class SupabaseCache:
                     k=int(r["k"]),
                     rollouts=r["rollouts"],
                     miner_hotkey=r.get("miner_hotkey"),
+                    tier=r.get("tier"),
                 )
                 for r in (res.data or [])
             ]
@@ -244,6 +489,70 @@ class SupabaseCache:
                 "load_unconsumed_batches failed ckpt=%s", checkpoint_hash,
             )
             return []
+
+    def load_unconsumed_batches_by_tier(
+        self, checkpoint_hash: str, tier: str
+    ) -> list[PersistedBatch]:
+        """Load unconsumed pregen batches filtered to a single tier.
+
+        Used by the engine to draw a diverse mix per submission window
+        (e.g. one ``stable`` + one ``proven`` + one ``exploratory``).
+        """
+        if not self.enabled:
+            return []
+        try:
+            res = (
+                self._client.table("pregen_batches")
+                .select("*")
+                .eq("checkpoint_hash", checkpoint_hash)
+                .eq("tier", tier)
+                .is_("consumed_at", "null")
+                .execute()
+            )
+            return [
+                PersistedBatch(
+                    prompt_idx=int(r["prompt_idx"]),
+                    checkpoint_hash=r["checkpoint_hash"],
+                    local_n=int(r["local_n"]),
+                    sigma=float(r["sigma"]),
+                    k=int(r["k"]),
+                    rollouts=r["rollouts"],
+                    miner_hotkey=r.get("miner_hotkey"),
+                    tier=r.get("tier"),
+                )
+                for r in (res.data or [])
+            ]
+        except Exception:
+            logger.exception(
+                "load_unconsumed_batches_by_tier failed ckpt=%s tier=%s",
+                checkpoint_hash, tier,
+            )
+            return []
+
+    def tier_counts(self, checkpoint_hash: str) -> dict[str, int]:
+        """Return ``{tier: unconsumed_count}`` for the given ckpt.
+
+        Useful for picker logic that wants to know what tiers are
+        available before issuing a per-tier load.
+        """
+        if not self.enabled:
+            return {}
+        try:
+            res = (
+                self._client.table("pregen_batches")
+                .select("tier")
+                .eq("checkpoint_hash", checkpoint_hash)
+                .is_("consumed_at", "null")
+                .execute()
+            )
+            counts: dict[str, int] = {}
+            for r in (res.data or []):
+                t = r.get("tier") or "untagged"
+                counts[t] = counts.get(t, 0) + 1
+            return counts
+        except Exception:
+            logger.exception("tier_counts failed ckpt=%s", checkpoint_hash)
+            return {}
 
     def mark_consumed(self, prompt_idx: int, checkpoint_hash: str) -> None:
         if not self.enabled:

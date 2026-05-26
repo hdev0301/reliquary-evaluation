@@ -32,13 +32,13 @@ find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 # survive a TERM/KILL on the parent if the parent died abnormally
 # (e.g. during a failed ckpt-reload). A leftover EngineCore holds
 # ~50 GB of VRAM and starves the next vLLM init.
-if pgrep -f "reliquary.cli.main mine" >/dev/null 2>&1; then
-  pkill -TERM -f "reliquary.cli.main mine" 2>/dev/null || true
+if pgrep -f "reliquary.*main.*mine" >/dev/null 2>&1; then
+  pkill -TERM -f "reliquary.*main.*mine" 2>/dev/null || true
   for _ in $(seq 1 20); do
-    pgrep -f "reliquary.cli.main mine" >/dev/null 2>&1 || break
+    pgrep -f "reliquary.*main.*mine" >/dev/null 2>&1 || break
     sleep 0.5
   done
-  pkill -9 -f "reliquary.cli.main mine" 2>/dev/null || true
+  pkill -9 -f "reliquary.*main.*mine" 2>/dev/null || true
   sleep 1
 fi
 # Sweep any orphaned vLLM workers (no graceful TERM — the parent's

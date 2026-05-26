@@ -6,10 +6,16 @@
 #   * uv installer (if missing)
 #   * a fresh venv at $VENV_DIR (default /root/.venv) on Python 3.12
 #   * reliquary installed editable from $INSTALL_DIR (default /root/reliquary)
-#   * torch 2.11.0+cu130 — matches the validator's H100/sm_90 build
+#   * torch 2.11.0+cu130 — matches the validator's build
 #   * transformers 5.8.0 — matches the validator
-#   * NO flash-attn (validator runs sdpa)
-#   * a populated scripts/.env (wallet, HF token, paths, knobs)
+#   * vllm 0.20.2 (auto-selects FlashAttention 2 backend)
+#   * kernels — HF kernels hub client; transformers falls back to
+#     ``kernels-community/flash-attn2`` here when local flash-attn
+#     isn't compiled (validator runs FA2; the miner's HF sketch must
+#     match its numerics or sketch_diff_max blows up)
+#   * supabase — persistence cache (dud_set + pregen_batches across
+#     machines/restarts/checkpoints)
+#   * a populated scripts/.env (wallet, HF token, FA2, EosGuard, paths)
 #
 # Usage:
 #   # Edit the WALLET_* and HF_TOKEN values below FIRST, then:
@@ -40,6 +46,14 @@ HF_TOKEN="${HF_TOKEN:-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}"
 
 # Validator endpoint. The subnet-owner validator during launch phase:
 VALIDATOR_URL="${VALIDATOR_URL:-http://86.38.238.30:8080}"
+
+# Supabase persistence cache — shared across machines so the local
+# miner + sibling scrape_intel.py + sibling prep_dataset.py boxes all
+# hydrate from the same (dud_set, known_good, pregen_batches) state.
+# The KEY must be a service_role JWT (anon/publishable can't write).
+# Leave empty to disable persistence on this machine.
+SUPABASE_URL="${SUPABASE_URL:-https://fwyglzgpodpflkdoibdh.supabase.co}"
+SUPABASE_KEY="${SUPABASE_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ3eWdsemdwb2RwZmxrZG9pYmRoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3OTcyNTM1NywiZXhwIjoyMDk1MzAxMzU3fQ.LsqslSQ1ruA7vuef4MUKMOhrun64eQR7aymaQMi3XGg}"
 
 # Layout. Override via env vars if your tree is elsewhere.
 INSTALL_DIR="${INSTALL_DIR:-/root/reliquary}"
@@ -134,6 +148,18 @@ else
   echo "[setup] skipping vllm (INSTALL_VLLM=0)"
 fi
 
+# HF kernels hub client. The miner's HF sketch model runs with
+# attn_implementation=flash_attention_2 to match the validator's FA2
+# forward (sketch_diff_max collapses when both kernels agree). On
+# stacks where flash-attn proper has no prebuilt wheel (torch 2.11 +
+# cu130 + sm_120 Blackwell is one such), transformers 5.8 auto-falls
+# back to ``kernels-community/flash-attn2`` from the HF hub IF the
+# ``kernels`` pip package is installed. Without it, model load raises
+# ``ImportError: the package for FlashAttention2 doesn't seem to be
+# installed``.
+echo "[setup] installing kernels (HF kernels-hub client for FA2 fallback)"
+VIRTUAL_ENV="$VENV_DIR" uv pip install 'kernels'
+
 # ─────────────────────────────────────────────────────────────────────
 # Sanity check
 # ─────────────────────────────────────────────────────────────────────
@@ -180,10 +206,16 @@ export BT_HOTKEY=$WALLET_HOTKEY
 # this is the cold-start default if the validator isn't reachable yet.
 export RELIQUARY_CHECKPOINT=Qwen/Qwen3-4B-Instruct-2507
 
-# Attention. Validator runs no flash_attn; match it with sdpa via the
-# constant the engine actually reads (GRAIL_ATTN_IMPL).
-export RELIQUARY_ATTN_IMPL=sdpa
-export GRAIL_ATTN_IMPL=sdpa
+# Attention. Validator runs FlashAttention 2; match it on both gen and
+# sketch paths or sketch_diff_max blows up and the validator rejects
+# with bad_termination. vLLM 0.20.2 auto-selects FLASH_ATTN backend
+# (FA2) on Hopper/Blackwell. HF transformers needs attn_impl set
+# explicitly to flash_attention_2; on stacks without compiled
+# flash-attn, transformers 5.8 falls back to kernels-community/
+# flash-attn2 from HF hub (requires the ``kernels`` pip pkg installed
+# above).
+export RELIQUARY_ATTN_IMPL=flash_attention_2
+export GRAIL_ATTN_IMPL=flash_attention_2
 
 # HF token to pull published checkpoints from the validator's HF repo.
 export HF_TOKEN=$HF_TOKEN
@@ -236,6 +268,28 @@ export RELIQUARY_SHARE_MODEL=1
 # Comment out (or set to 0) to fall back to pure-HF generation.
 export RELIQUARY_USE_VLLM=1
 
+# VllmV1EosGuard logits processor. Registered on the vLLM engine via
+# cli/main.py to mask EOS tokens to -inf at decode positions where raw
+# p(EOS) falls below RELIQUARY_VLLM_EOS_THRESHOLD. Without it, vLLM
+# samples EOS at borderline-confidence positions that the validator's
+# HF forward then rejects with bad_termination(low_p_stop). The IDS
+# env var is required — the guard's __init__ raises if absent.
+# Qwen3-Instruct's generation_config.eos_token_id lists both
+# <|im_end|>=151645 and <|endoftext|>=151643; include both so a stop
+# on either trims correctly downstream.
+export RELIQUARY_VLLM_EOS_IDS=151643,151645
+# Threshold = validator's MIN_EOS_PROBABILITY floor (0.005) plus
+# headroom. Going lower lets more rollouts terminate but adds
+# low_p_stop preverify-skips; going higher reduces drift cases but
+# more rollouts hit max_new_tokens cap and need regen.
+export RELIQUARY_VLLM_EOS_THRESHOLD=0.008
+
+# CUDA allocator. vLLM + HF on the same GPU fragment the bf16 arena
+# enough that a single 5 GiB log_softmax for the sketch can fail to
+# allocate even when nominally free VRAM is enough. expandable_segments
+# coalesces reservations to fix this.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Submitter-only mode. When set, the local pregen worker is disabled
 # and this miner only submits batches that some other machine wrote
 # into Supabase pregen_batches (via scripts/prep_dataset.py). Default
@@ -246,12 +300,13 @@ export RELIQUARY_USE_VLLM=1
 # the miner hydrates dud_set + known_good + pregen_queue from a shared
 # Supabase project on every ckpt advance, and persists outcomes +
 # batches as it runs. Cross-machine + cross-restart durability for the
-# expensive pregen work. Leave empty to disable. The KEY must be the
-# service_role JWT (anon/publishable can't write). Schema file:
-# $INSTALL_DIR/sql/supabase_schema.sql — paste into your project's
-# SQL editor once.
-export RELIQUARY_SUPABASE_URL=
-export RELIQUARY_SUPABASE_KEY=
+# expensive pregen work. Same project should be set on sibling boxes
+# running scripts/scrape_intel.py and scripts/prep_dataset.py. The KEY
+# must be the service_role JWT (anon/publishable can't write). Schema:
+# $INSTALL_DIR/sql/supabase_schema.sql — paste into your project's SQL
+# editor once. Leave empty to disable.
+export RELIQUARY_SUPABASE_URL=$SUPABASE_URL
+export RELIQUARY_SUPABASE_KEY=$SUPABASE_KEY
 
 export PYTHONUNBUFFERED=1
 EOF
