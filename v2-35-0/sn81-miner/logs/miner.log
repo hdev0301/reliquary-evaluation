@@ -1,0 +1,23 @@
+2026-06-03 02:16:10 | MainThread | reliquary.cli | INFO | Starting Reliquary miner (network=finney, netuid=81, env=openmathinstruct)
+2026-06-03 02:16:10 | MainThread | bittensor | INFO | Enabling default logging (Warning level)
+[34m2026-06-03 02:16:10.526[39m | [1m[37m  INFO  [0m | Enabling default logging (Warning level)
+2026-06-03 02:16:13 | MainThread | httpx | INFO | HTTP Request: GET http://86.38.238.30:8080/state "HTTP/1.1 200 OK"
+2026-06-03 02:16:14 | MainThread | httpx | INFO | HTTP Request: GET https://huggingface.co/api/models/R0mAI/reliquary-sn-v23/revision/7926d852f1d955f44443fac1476681e0e0fdde92 "HTTP/1.1 200 OK"
+Fetching 7 files:   0%|          | 0/7 [00:00<?, ?it/s]Fetching 7 files: 100%|██████████| 7/7 [00:00<00:00, 28312.56it/s]
+INFO 06-03 02:16:15 [utils.py:233] non-default args: {'tokenizer': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92', 'dtype': 'bfloat16', 'max_model_len': 9216, 'enable_prefix_caching': True, 'gpu_memory_utilization': 0.8, 'max_num_seqs': 192, 'disable_log_stats': True, 'enforce_eager': True, 'limit_mm_per_prompt': {'image': 0, 'video': 0}, 'model': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92'}
+INFO 06-03 02:16:15 [model.py:555] Resolved architecture: Qwen3_5ForConditionalGeneration
+INFO 06-03 02:16:15 [model.py:1680] Using max model len 9216
+INFO 06-03 02:16:15 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+WARNING 06-03 02:16:15 [config.py:367] Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration by default when prefix caching is enabled
+INFO 06-03 02:16:15 [config.py:387] Warning: Prefix caching in Mamba cache 'align' mode is currently enabled. Its support for Mamba layers is experimental. Please report any issues you may observe.
+INFO 06-03 02:16:15 [vllm.py:840] Asynchronous scheduling is enabled.
+WARNING 06-03 02:16:15 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-03 02:16:15 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-03 02:16:15 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+INFO 06-03 02:16:16 [vllm.py:1089] Cudagraph is disabled under eager mode
+INFO 06-03 02:16:16 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+INFO 06-03 02:16:17 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 06-03 02:16:17 [nixl_utils.py:34] NIXL is not available
+WARNING 06-03 02:16:17 [nixl_utils.py:44] NIXL agent config is not available
+[transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+INFO 06-03 02:16:18 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
