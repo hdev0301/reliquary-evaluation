@@ -20,8 +20,9 @@ try:
     mask = pc.and_(pc.and_(num_mask, src_mask), len_mask)
     m = mask.combine_chunks().to_numpy(zero_copy_only=False)
     idxs = np.nonzero(m)[0].astype(int).tolist()
-    json.dump(idxs, open("/root/inzone_pool_qwen35.json", "w"))
-    print("BUILT /root/inzone_pool_qwen35.json size:", len(idxs))
+    out = "/root/sn81-miner/data/inzone_pool_qwen35.json"
+    json.dump(idxs, open(out, "w"))
+    print("BUILT", out, "size:", len(idxs))
     # breakdown + samples
     src_np = src.combine_chunks().to_pylist()
     ans_np = ans.combine_chunks().to_pylist()

@@ -81,9 +81,10 @@ for i in range(N):
         else:
             typ["other"] += 1
 
-json.dump(pool, open("/root/brittle_pool.json", "w"))
+out = "/root/sn81-miner/data/inzone_pool_brittle.json"
+json.dump(pool, open(out, "w"))
 am = sum(1 for s in src if s == "augmented_math")
-print(f"brittle pool: {len(pool)} / {am} augmented_math ({100*len(pool)/am:.0f}%) -> /root/brittle_pool.json")
+print(f"brittle pool: {len(pool)} / {am} augmented_math ({100*len(pool)/am:.0f}%) -> {out}")
 print(f"type breakdown: {dict(typ)}")
 import random
 random.seed(0)
