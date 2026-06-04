@@ -28,7 +28,6 @@ interface Props {
 // signal to identify the miner without duplicating the full stats table.
 export default function ChartRow({
   hotkey,
-  uid,
   strip,
   latestWindow,
   status,
@@ -38,14 +37,11 @@ export default function ChartRow({
 }: Props) {
   const liveState = error ? 'error' : inFlight ? 'polling' : 'idle'
   const lastUpdate = lastFetchedAt ? fmtRelative(Date.now() - lastFetchedAt) : '...'
-  // Show the uid as the card label; fall back to the short hotkey until the
-  // miner data (which carries the uid) has loaded. Full hotkey stays on hover.
-  const label = uid != null ? `uid ${uid}` : shortHotkey(hotkey)
   return (
     <div className="chart-row">
       <div className="chart-row-header">
         <span className="mono chart-row-hk" title={hotkey}>
-          {label}
+          {shortHotkey(hotkey)}
         </span>
         <span className="status-pill" data-status={error ? 'error' : status}>
           {error ? 'error' : status}

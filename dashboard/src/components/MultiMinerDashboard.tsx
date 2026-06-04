@@ -88,6 +88,28 @@ export default function MultiMinerDashboard({ urlHotkeys, fallbackHotkey }: Prop
     setSnapshots((prev) => ({ ...prev, [hk]: snap }))
   }, [])
 
+  // Auto-add the current top 3 hotkeys (by accepted sample count over the last
+  // 5 windows) once the stored list has hydrated. addHotkey() dedupes, so any
+  // hotkey already shown is skipped — no duplication.
+  useEffect(() => {
+    if (!hydrated) return
+    let cancelled = false
+    fetch('/api/top-hotkeys', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { top?: Array<{ hotkey: string }> } | null) => {
+        if (cancelled || !Array.isArray(j?.top)) return
+        for (const t of j!.top) {
+          if (typeof t?.hotkey === 'string') addHotkey(t.hotkey)
+        }
+      })
+      .catch(() => {
+        // top-hotkeys unavailable (e.g. upstream challenge) — non-fatal
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hydrated, addHotkey])
+
   return (
     <>
       <HotkeyManager hotkeys={hotkeys} onAdd={addHotkey} />
