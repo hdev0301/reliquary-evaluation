@@ -75,5 +75,7 @@ function emptySlot(window: number): WindowStatus {
     topReason: null,
     createdAt: null,
     slots: [],
+    batchFilled: 0,
+    otherRejects: 0,
   }
 }

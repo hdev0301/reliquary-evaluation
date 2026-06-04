@@ -1,32 +1,35 @@
-import { reasonSeverity } from './reasons'
 import type { Bucket, WindowDetail, WindowStatus } from './types'
 
 // Protocol cap from reliquary docs: MAX_SUBMISSIONS_PER_HOTKEY_PER_WINDOW = 8.
 export const MAX_SLOTS_PER_WINDOW = 8
 
-// Reconcile validator counters with the miner_reject_reasons fallback. Observed
-// anomaly (window 11433 in the probe): submitted=4 but accepted/soft/hard=0,
-// while miner_reject_reasons={batch_filled:4}. In that case we re-derive the
-// soft/hard split from the reason map so the dot column isn't empty.
 function bucketCounts(r: WindowDetail): {
   accepted: number
   soft: number
   hard: number
   submitted: number
 } {
-  let accepted = r.accepted ?? 0
-  let soft = r.soft_failed ?? 0
-  let hard = r.hard_failed ?? 0
-  const submitted = r.submitted ?? 0
-
-  if (submitted > 0 && accepted + soft + hard === 0 && r.miner_reject_reasons) {
-    for (const [reason, count] of Object.entries(r.miner_reject_reasons)) {
-      const sev = reasonSeverity(reason)
-      if (sev === 'soft') soft += count
-      else hard += count
-    }
+  return {
+    accepted: r.accepted ?? 0,
+    soft: r.soft_failed ?? 0,
+    hard: r.hard_failed ?? 0,
+    submitted: r.submitted ?? 0,
   }
-  return { accepted, soft, hard, submitted }
+}
+
+// Per-window reject tally from miner_reject_reasons (the genuine per-window,
+// per-miner reject breakdown — note /api/miners?window= carries only a
+// CUMULATIVE reject_reasons, so it can't drive per-window verticals).
+// batch_filled is benign (lost the slot) -> brown ring; every other reason is
+// integrity / behavioural -> red ring.
+function rejectCounts(r: WindowDetail): { batchFilled: number; otherRejects: number } {
+  let batchFilled = 0
+  let otherRejects = 0
+  for (const [reason, count] of Object.entries(r.miner_reject_reasons ?? {})) {
+    if (reason === 'batch_filled') batchFilled += count
+    else otherRejects += count
+  }
+  return { batchFilled, otherRejects }
 }
 
 // One dot per actual submission, ordered bottom-up by severity:
@@ -42,23 +45,27 @@ function buildSlots(accepted: number, soft: number, hard: number): Bucket[] {
 
 // Summary bucket for tooltip + accent purposes. Accept-dominant priority:
 // any acceptance wins the window; otherwise red beats brown beats blank.
+// Rejects participate so a reject-only window isn't styled 'blank'.
 function summaryBucket(
   accepted: number,
   soft: number,
   hard: number,
   submitted: number,
+  batchFilled: number,
+  otherRejects: number,
 ): Bucket {
-  if (submitted === 0 && accepted + soft + hard === 0) return 'blank'
+  if (submitted === 0 && accepted + soft + hard + batchFilled + otherRejects === 0) return 'blank'
   if (accepted > 0) return 'accepted'
-  if (hard > 0) return 'hard'
-  if (soft > 0) return 'soft'
+  if (hard > 0 || otherRejects > 0) return 'hard'
+  if (soft > 0 || batchFilled > 0) return 'soft'
   return 'blank'
 }
 
 export function classifyWindow(r: WindowDetail): WindowStatus {
   const { accepted, soft, hard, submitted } = bucketCounts(r)
+  const { batchFilled, otherRejects } = rejectCounts(r)
   const slots = buildSlots(accepted, soft, hard)
-  const bucket = summaryBucket(accepted, soft, hard, submitted)
+  const bucket = summaryBucket(accepted, soft, hard, submitted, batchFilled, otherRejects)
 
   let topReason: string | null = null
   if (r.miner_reject_reasons) {
@@ -80,5 +87,7 @@ export function classifyWindow(r: WindowDetail): WindowStatus {
     topReason,
     createdAt: r.created_at ?? null,
     slots,
+    batchFilled,
+    otherRejects,
   }
 }

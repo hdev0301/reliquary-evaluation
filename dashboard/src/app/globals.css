@@ -213,6 +213,26 @@ main {
   background: var(--blank);
 }
 
+/* Per-window reject tally: one hollow bordered circle per rejected sample,
+   stacked above the filled submission dots in each window column. batch_filled
+   is brown-bordered (benign, lost the slot); all other reasons are red-bordered
+   (integrity / behavioural). */
+.reject-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1.5px solid var(--border);
+}
+.reject-dot[data-kind='batch_filled'] {
+  border-color: var(--soft);
+}
+.reject-dot[data-kind='other'] {
+  border-color: var(--hard);
+}
+
 .legend {
   display: flex;
   gap: 16px;

@@ -34,6 +34,14 @@ export default function ChartsSection({ hotkeys, snapshots }: Props) {
             hard-failed
           </span>
           <span className="legend-item muted">no submission</span>
+          <span className="legend-item">
+            <span className="reject-dot" data-kind="batch_filled" />
+            batch-filled reject
+          </span>
+          <span className="legend-item">
+            <span className="reject-dot" data-kind="other" />
+            other reject
+          </span>
         </div>
       </div>
       <div className="chart-row-list">
