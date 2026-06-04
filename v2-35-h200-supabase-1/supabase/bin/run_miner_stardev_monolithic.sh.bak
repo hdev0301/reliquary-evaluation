@@ -1,0 +1,99 @@
+#!/bin/bash
+# Reliquary SN81 miner — HONEST launch for hotkey `stardev`. Single run, one pool.
+#
+# Honest vs curation: this runs the SAME miner binary with RELIQUARY_CURATE=0, which
+# (pregen.py:700) submits the FIRST 8 NATURAL completions and keeps the group ONLY
+# when it is *naturally* in-zone — no subset selection, no non-monotonic reward_shape
+# placement, no local gate pre-validation, no two-stage evasion screen.
+#
+# The --prompt-idx-file here is WORKLOAD selection only (which OMI prompts to attempt,
+# like the upstream --frontier predictor); it does NOT change how a submission is
+# formed. Submissions remain honest first-8 groups.
+#
+# Usage:  bash run_miner_stardev.sh [POOL_FILENAME]      # default: inzone_pool.json
+#         POOL is a filename under /root/sn81-miner/data/ (the autopool supervisor
+#         passes the toggled pool here).
+set -euo pipefail
+
+cd /root/reliquary || exit 1
+
+POOL="${1:-${STARDEV_POOL:-inzone_pool.json}}"
+POOL_PATH="/root/sn81-miner/data/${POOL}"
+[ -f "$POOL_PATH" ] || { echo "pool not found: $POOL_PATH" >&2; exit 1; }
+
+# Stop any miner already running AND reap orphaned vLLM EngineCore workers. When a
+# miner parent is SIGKILLed, its EngineCore child is reparented to init and KEEPS its
+# ~105 GiB of GPU memory; the next launch then can't allocate gpu_mem_util and dies in
+# seconds -> crash loop. `pkill` on the parent pattern alone does NOT match the
+# "VLLM::EngineCore" workers, so target them by their process name too.
+pkill -9 -f "reliquary.cli.main mine" 2>/dev/null || true
+pkill -9 -f "VLLM::EngineCore" 2>/dev/null || true
+# Wait until the GPU memory is actually released before the new engine allocates.
+for _ in $(seq 1 20); do
+  used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+  [ "${used:-9999}" -lt 2000 ] 2>/dev/null && break
+  sleep 1
+done
+
+# Base runtime config (network, netuid, checkpoint, validator URL, HF token,
+# GRAIL_ATTN_IMPL, oversample/max-new-tokens, prompt sources, drand). Secrets and
+# pins live here; we override only the hotkey + force honest mode below.
+set -a; source scripts/.env; set +a
+
+# --- the only deviations from scripts/.env ---
+export BT_HOTKEY=stardev                 # mine under the stardev hotkey (UID 130 on SN81)
+export RELIQUARY_CURATE=0                 # HONEST mode: first-8 natural samples (pregen.py:701)
+export RELIQUARY_OMI_SHARDS=2             # inzone_pool* idxs index a fixed 2-shard OMI ordering
+export RELIQUARY_MAX_PER_WINDOW=8         # fire up to 8 concurrent submits at window-open to
+                                          # contest the 8 subnet-wide proof-admission slots. Raised
+                                          # from 2: we were winning 0 slots (all batch_filled), and
+                                          # batch_filled attempts are NOT burned, so extra tries are free.
+export RELIQUARY_MAX_NUM_SEQS=256         # vLLM concurrent seqs (was 192); GPU was only ~77% util
+
+# Belt-and-suspenders: make sure no curation/evasion knob leaks in from the shell.
+unset RELIQUARY_CURATE_TARGET_K RELIQUARY_CURATE_MARGIN RELIQUARY_SAFE_P_STOP 2>/dev/null || true
+unset RELIQUARY_SCREEN_OVERSAMPLE RELIQUARY_SCREEN_MAX_TOKENS RELIQUARY_SCREEN_MIN_TERM 2>/dev/null || true
+unset RELIQUARY_SCREEN_P_LOW RELIQUARY_SCREEN_P_HIGH RELIQUARY_PROMPT_IDX_FILE 2>/dev/null || true
+export RELIQUARY_TWO_STAGE=0
+export RELIQUARY_DECOOL_SNIPE=0
+export RELIQUARY_SYMBOLIC_ONLY=0
+# Fresh, stardev-scoped caches (kept separate from the hdev0301/curation files):
+#   hot pool   = re-mine prompts that naturally yielded in-zone groups (genuine rollouts)
+#   burned     = anti-HASH_DUPLICATE list of prompts THIS hotkey already submitted
+export RELIQUARY_HOT_POOL_PATH=/root/sn81-miner/data/hot_pool_stardev.json
+export RELIQUARY_BURNED_PATH=/root/sn81-miner/data/submitted_idx_stardev.json
+
+# Memory hygiene for the Qwen3.5 multimodal proof model forward pass.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# vLLM load fixes (this checkpoint is bf16, not FP8): the DeepGEMM FP8 kernel warmup
+# is pure overhead here AND crashes vLLM at load because `deep_gemm` isn't installed
+# (RuntimeError: DeepGEMM backend is not available). Disable it. The enforce_eager +
+# gdn_prefill_backend=triton load config is applied in miner/vllm_backend.py.
+export VLLM_USE_DEEP_GEMM=0
+export VLLM_DEEP_GEMM_WARMUP=skip
+
+mkdir -p /root/sn81-miner/logs /root/sn81-miner/data
+[ -f "$RELIQUARY_HOT_POOL_PATH" ] || printf '[]' > "$RELIQUARY_HOT_POOL_PATH"
+[ -f "$RELIQUARY_BURNED_PATH" ]   || printf '[]' > "$RELIQUARY_BURNED_PATH"
+rm -f /root/sn81-miner/logs/miner.log
+
+# Speed: depth->breadth rebalance grounded in the live stats (avg_completions~32,
+# only the first 8 are used, GPU was ~77% util). oversample 64->40 (>=8 still
+# terminate) frees compute for gen-batch 24->40 = +67% distinct prompts searched
+# per batch -> more natural in-zone groups found per minute, ~same GPU compute.
+nohup .venv/bin/python -m reliquary.cli.main mine \
+  --network "${BT_NETWORK:-finney}" --netuid "${NETUID:-81}" \
+  --wallet-name "${BT_WALLET_NAME:-ronnywebdev}" --hotkey "$BT_HOTKEY" \
+  --checkpoint "${RELIQUARY_CHECKPOINT:-Qwen/Qwen3.5-4B}" \
+  --validator-url "${RELIQUARY_VALIDATOR_URL:-http://86.38.238.30:8080}" \
+  --gpu-memory-utilization 0.78 \
+  --gen-batch 40 --pool-size 96 \
+  --max-new-tokens "${RELIQUARY_MAX_NEW_TOKENS:-1024}" \
+  --oversample 40 \
+  --prompt-idx-file "$POOL_PATH" \
+  --use-drand \
+  --log-level INFO > /root/sn81-miner/logs/miner.log 2>&1 &
+
+echo $! > /root/sn81-miner/miner.pid
+echo "launched PID=$(cat /root/sn81-miner/miner.pid) | hotkey=stardev curate=0 (honest) | pool=${POOL} | log=/root/sn81-miner/logs/miner.log"

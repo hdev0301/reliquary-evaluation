@@ -1,0 +1,15 @@
+14:49:04 | autopool | supervisor start (pools=inzone_pool.json inzone_pool_qwen35.json switch_after=15 windows poll=20s)
+14:49:04 | autopool | launching pool=inzone_pool.json
+14:50:24 | autopool | pool=inzone_pool.json mining from window=11598
+14:57:04 | autopool | miner not running (pid=8039) — relaunching pool=inzone_pool.json
+14:57:04 | autopool | launching pool=inzone_pool.json
+14:57:46 | autopool | pool=inzone_pool.json mining from window=11599
+15:28:06 | autopool | miner not running (pid=8855) — relaunching pool=inzone_pool.json
+15:28:06 | autopool | launching pool=inzone_pool.json
+15:28:48 | autopool | pool=inzone_pool.json mining from window=11606
+honest) | pool=inzone_pool.json | log=/root/sn81-miner/logs/miner.log
+14:57:46 | autopool | pool=inzone_pool.json mining from window=11599
+15:28:06 | autopool | miner not running (pid=8855) — relaunching pool=inzone_pool.json
+15:28:06 | autopool | launching pool=inzone_pool.json
+launched PID=10956 | hotkey=stardev curate=0 (honest) | pool=inzone_pool.json | log=/root/sn81-miner/logs/miner.log
+15:28:48 | autopool | pool=inzone_pool.json mining from window=11606
