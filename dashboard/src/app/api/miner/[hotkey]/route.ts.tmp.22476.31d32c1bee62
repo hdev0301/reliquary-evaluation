@@ -53,20 +53,6 @@ function buildHeaders(): Record<string, string> {
     headers['x-vercel-protection-bypass'] = bypass
     headers['x-vercel-set-bypass-cookie'] = 'true'
   }
-  // Challenge-clearance cookie forwarded by the companion browser extension
-  // (see ../../../../extension), or a static RELIQUA_COOKIE in .env.local. A real
-  // browser solves reliqua.ai's Vercel Attack Mode challenge; we replay its
-  // cookies here so this server fetch is treated as the already-cleared client.
-  // The extension also forwards the browser's User-Agent — match it, since the
-  // clearance can be UA-bound.
-  const runtimeBypass = getBypass()
-  const cookie = process.env.RELIQUA_COOKIE ?? runtimeBypass.cookie
-  if (cookie) {
-    headers['Cookie'] = cookie
-    if (!process.env.RELIQUA_COOKIE && runtimeBypass.userAgent) {
-      headers['User-Agent'] = runtimeBypass.userAgent
-    }
-  }
   return headers
 }
 

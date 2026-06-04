@@ -1,5 +1,6 @@
 import type { Bucket } from '@/lib/types'
 import type { HotkeySnapshot } from './HotkeyController'
+import HotkeyCell from './HotkeyCell'
 
 interface Props {
   hotkeys: string[]
@@ -87,9 +88,7 @@ export default function StatsTable({ hotkeys, snapshots, onRemove }: Props) {
               return (
                 <tr key={hk}>
                   <td>
-                    <span className="mono" title={hk}>
-                      {shortHotkey(hk)}
-                    </span>
+                    <HotkeyCell hotkey={hk} display={shortHotkey(hk)} />
                   </td>
                   <td className="num">{m?.uid ?? '-'}</td>
                   <td className="num">{typeof m?.rank === 'number' ? `#${m.rank}` : '-'}</td>

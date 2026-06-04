@@ -38,7 +38,12 @@ export default function HotkeyController({ hotkey, onSnapshot }: Props) {
   useEffect(() => {
     if (!data) return
     const incoming = data.window_detail ?? []
-    const { merged, latestWindow: lw } = mergeWindows(mapRef.current, incoming)
+    const subnetCurrentWindow = data.current_window?.window ?? null
+    const { merged, latestWindow: lw } = mergeWindows(
+      mapRef.current,
+      incoming,
+      subnetCurrentWindow,
+    )
     mapRef.current = merged
     setLatestWindow(lw)
     setVersion((v) => v + 1)

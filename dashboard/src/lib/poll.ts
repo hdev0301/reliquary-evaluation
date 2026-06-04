@@ -43,7 +43,19 @@ export function useMinerPoll(hotkey: string): PollState {
           signal: ac.signal,
           cache: 'no-store',
         })
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        if (!r.ok) {
+          // Try to read a structured error body so we can surface specific
+          // upstream conditions (e.g. Vercel challenge) instead of "HTTP 503".
+          let detail = `HTTP ${r.status}`
+          try {
+            const errJson = (await r.json()) as { error?: string; message?: string }
+            if (errJson?.message) detail = errJson.message
+            else if (errJson?.error) detail = errJson.error
+          } catch {
+            // body wasn't JSON; keep generic message
+          }
+          throw new Error(detail)
+        }
         const json = (await r.json()) as MinerResponse
         if (cancelled) return
         setData(json)

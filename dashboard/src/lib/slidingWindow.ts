@@ -4,12 +4,17 @@ import type { WindowDetail, WindowStatus } from './types'
 export const WINDOW_CAPACITY = 72
 
 // Merge a fresh poll into the existing Map and prune anything outside the
-// trailing 72-window window. The right edge is anchored to the highest window
-// number we've ever seen (either from incoming or from prev), so a transient
-// empty response doesn't make the strip jump backwards.
+// trailing 72-window window.
+//
+// The right edge is anchored to the SUBNET's current window when provided
+// (data.current_window.window), so a hotkey that hasn't submitted in a while
+// shows trailing blanks all the way up to "now" instead of stopping at their
+// last submission. We also fold in incoming/prev max so a transient empty
+// API response can't make the strip jump backwards.
 export function mergeWindows(
   prev: Map<number, WindowStatus>,
   incoming: WindowDetail[],
+  currentWindow?: number | null,
 ): { merged: Map<number, WindowStatus>; latestWindow: number } {
   const next = new Map(prev)
 
@@ -26,7 +31,11 @@ export function mergeWindows(
   for (const w of prev.keys()) {
     if (w > prevMax) prevMax = w
   }
-  const latestWindow = Math.max(incomingMax, prevMax)
+  const candidates: number[] = [incomingMax, prevMax]
+  if (typeof currentWindow === 'number' && Number.isFinite(currentWindow)) {
+    candidates.push(currentWindow)
+  }
+  const latestWindow = Math.max(...candidates)
   if (!Number.isFinite(latestWindow)) return { merged: next, latestWindow: 0 }
 
   const cutoff = latestWindow - (WINDOW_CAPACITY - 1)
