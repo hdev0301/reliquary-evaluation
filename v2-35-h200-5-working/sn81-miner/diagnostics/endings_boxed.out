@@ -1,0 +1,112 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+INFO 06-03 03:19:26 [utils.py:233] non-default args: {'tokenizer': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/', 'dtype': 'bfloat16', 'max_model_len': 9216, 'gpu_memory_utilization': 0.8, 'disable_log_stats': True, 'enforce_eager': True, 'limit_mm_per_prompt': {'image': 0, 'video': 0}, 'model': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/'}
+INFO 06-03 03:19:26 [model.py:555] Resolved architecture: Qwen3_5ForConditionalGeneration
+INFO 06-03 03:19:26 [model.py:1680] Using max model len 9216
+INFO 06-03 03:19:26 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 06-03 03:19:26 [vllm.py:840] Asynchronous scheduling is enabled.
+WARNING 06-03 03:19:26 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-03 03:19:26 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-03 03:19:26 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+INFO 06-03 03:19:27 [vllm.py:1089] Cudagraph is disabled under eager mode
+INFO 06-03 03:19:27 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+INFO 06-03 03:19:28 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 06-03 03:19:28 [nixl_utils.py:34] NIXL is not available
+WARNING 06-03 03:19:28 [nixl_utils.py:44] NIXL agent config is not available
+[transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+INFO 06-03 03:19:28 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+WARNING 06-03 03:19:29 [system_utils.py:157] We must use the `spawn` multiprocessing start method. Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing for more information. Reasons: CUDA is initialized
+(EngineCore pid=194378) INFO 06-03 03:19:33 [core.py:109] Initializing a V1 LLM engine (v0.20.2) with config: model='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/', speculative_config=None, tokenizer='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=9216, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=True, moe_backend='auto')
+(EngineCore pid=194378) WARNING 06-03 03:19:33 [nixl_utils.py:34] NIXL is not available
+(EngineCore pid=194378) WARNING 06-03 03:19:33 [nixl_utils.py:44] NIXL agent config is not available
+(EngineCore pid=194378) [transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+(EngineCore pid=194378) INFO 06-03 03:19:35 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=194378) INFO 06-03 03:19:35 [parallel_state.py:1402] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.24.0.2:59427 backend=nccl
+(EngineCore pid=194378) INFO 06-03 03:19:35 [parallel_state.py:1715] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=194378) INFO 06-03 03:19:36 [gpu_model_runner.py:4777] Starting to load model /root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/7926d852f1d955f44443fac1476681e0e0fdde92/...
+(EngineCore pid=194378) INFO 06-03 03:19:36 [cuda.py:423] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(EngineCore pid=194378) INFO 06-03 03:19:36 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(EngineCore pid=194378) INFO 06-03 03:19:36 [gdn_linear_attn.py:146] Using FlashInfer GDN prefill kernel
+(EngineCore pid=194378) INFO 06-03 03:19:36 [gdn_linear_attn.py:147] FlashInfer GDN prefill kernel is JIT-compiled; first run may take a while to compile. Set `--gdn-prefill-backend triton` to avoid JIT compile time.
+(EngineCore pid=194378) INFO 06-03 03:19:36 [cuda.py:368] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=194378) INFO 06-03 03:19:36 [flash_attn.py:646] Using FlashAttention version 3
+(EngineCore pid=194378) INFO 06-03 03:19:36 [weight_utils.py:904] Filesystem type for checkpoints: XFS. Checkpoint size: 8.46 GiB. Available RAM: 241.88 GiB.
+(EngineCore pid=194378) INFO 06-03 03:19:36 [weight_utils.py:927] Auto-prefetch is disabled because the filesystem (XFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=194378) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=194378) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  2.48it/s]
+(EngineCore pid=194378) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  2.48it/s]
+(EngineCore pid=194378) 
+(EngineCore pid=194378) INFO 06-03 03:19:37 [default_loader.py:384] Loading weights took 0.48 seconds
+(EngineCore pid=194378) INFO 06-03 03:19:37 [gpu_model_runner.py:4879] Model loading took 7.99 GiB memory and 0.826992 seconds
+(EngineCore pid=194378) INFO 06-03 03:19:37 [interface.py:606] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=194378) INFO 06-03 03:19:37 [interface.py:630] Padding mamba page size by 0.76% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=194378) INFO 06-03 03:19:39 [gpu_worker.py:440] Available KV cache memory: 100.08 GiB
+(EngineCore pid=194378) INFO 06-03 03:19:39 [kv_cache_utils.py:1708] GPU KV cache size: 2,725,302 tokens
+(EngineCore pid=194378) INFO 06-03 03:19:39 [kv_cache_utils.py:1709] Maximum concurrency for 9,216 tokens per request: 295.71x
+(EngineCore pid=194378) 2026-06-03 03:19:39,343 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=194378) 2026-06-03 03:19:39,408 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=194378) INFO 06-03 03:19:39 [core.py:306] init engine (profile, create kv cache, warmup model) took 1.88 s
+(EngineCore pid=194378) INFO 06-03 03:19:39 [vllm.py:840] Asynchronous scheduling is enabled.
+(EngineCore pid=194378) WARNING 06-03 03:19:39 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=194378) WARNING 06-03 03:19:39 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=194378) INFO 06-03 03:19:39 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+(EngineCore pid=194378) INFO 06-03 03:19:39 [vllm.py:1089] Cudagraph is disabled under eager mode
+(EngineCore pid=194378) INFO 06-03 03:19:39 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+PROMPT[0] (confirm boxed instruction present): 'w many cookies does Alexandra have left?\n\nPut your final answer within \\boxed{}.'
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 91.80it/s]
+Processed prompts:   0%|          | 0/8 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 8/8 [00:35<00:00,  4.45s/it, est. speed input: 13.25 toks/s, output: 326.64 toks/s]Processed prompts: 100%|██████████| 8/8 [00:35<00:00,  4.45s/it, est. speed input: 13.25 toks/s, output: 326.64 toks/s]Processed prompts: 100%|██████████| 8/8 [00:35<00:00,  4.45s/it, est. speed input: 13.25 toks/s, output: 326.64 toks/s]
+
+==========================================================================================
+IDX 361195  GT='240'  Q='Alexandra makes 30 cookies per day. She bakes cookies for 12 days and then gives away one-third of the cookies'
+  OK BOX r=1.0 fin=stop LAST_LINE='$\\boxed{240}$'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{240}'
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 835.52it/s]
+Processed prompts:   0%|          | 0/8 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 8/8 [01:39<00:00, 12.46s/it, est. speed input: 6.10 toks/s, output: 401.72 toks/s]Processed prompts: 100%|██████████| 8/8 [01:39<00:00, 12.46s/it, est. speed input: 6.10 toks/s, output: 401.72 toks/s]Processed prompts: 100%|██████████| 8/8 [01:39<00:00, 12.46s/it, est. speed input: 6.10 toks/s, output: 401.72 toks/s]
+
+==========================================================================================
+IDX 824648  GT='2700'  Q='Mia built a triangular-shaped picture frame with a base of 60 centimeters and a height of 30 centimeters. If s'
+  XX BOX r=0.0 fin=stop LAST_LINE='\\boxed{2700 \\text{ cm}^2}'
+  XX BOX r=0.0 fin=length LAST_LINE="I'll provide 2700 cm^2 in the"
+  XX BOX r=0.0 fin=length LAST_LINE='Wait, looking at the requested'
+  XX BOX r=0.0 fin=stop LAST_LINE='\\boxed{2700 \\text{ cm}^2}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{2700}'
+  OK BOX r=1.0 fin=length LAST_LINE='"Mia built a triangular-shaped picture frame with a base of 60 centimeters and'
+  XX BOX r=0.0 fin=length LAST_LINE="Let's go with `\\boxed{2700"
+  XX BOX r=0.0 fin=stop LAST_LINE='\\boxed{2700 \\text{ cm}^2}'
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 803.04it/s]
+Processed prompts:   0%|          | 0/8 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 8/8 [00:43<00:00,  5.39s/it, est. speed input: 15.21 toks/s, output: 272.84 toks/s]Processed prompts: 100%|██████████| 8/8 [00:43<00:00,  5.39s/it, est. speed input: 15.21 toks/s, output: 272.84 toks/s]Processed prompts: 100%|██████████| 8/8 [00:43<00:00,  5.39s/it, est. speed input: 15.21 toks/s, output: 272.84 toks/s]
+
+==========================================================================================
+IDX 198049  GT='49'  Q='Ava and Ethan spent the evening helping with household chores. When folding the clothes Ava took four minutes '
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{49}'
+Rendering prompts:   0%|          | 0/1 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 1/1 [00:00<00:00, 795.73it/s]
+Processed prompts:   0%|          | 0/8 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████| 8/8 [01:37<00:00, 12.22s/it, est. speed input: 6.22 toks/s, output: 213.89 toks/s]Processed prompts: 100%|██████████| 8/8 [01:37<00:00, 12.22s/it, est. speed input: 6.22 toks/s, output: 213.89 toks/s]Processed prompts: 100%|██████████| 8/8 [01:37<00:00, 12.22s/it, est. speed input: 6.22 toks/s, output: 213.89 toks/s]
+(EngineCore pid=194378) INFO 06-03 03:24:16 [core.py:1238] Shutdown initiated (timeout=0)
+(EngineCore pid=194378) INFO 06-03 03:24:16 [core.py:1261] Shutdown complete
+[rank0]:[W603 03:24:16.090859816 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+
+==========================================================================================
+IDX 561360  GT='17'  Q='Ava is studying vocabulary for the SAT. She received 1200 index cards with words to learn. She already knows 1'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+  XX BOX r=0.0 fin=length LAST_LINE='Usually, if a word problem has "1200 apples" and "'
+  OK BOX r=1.0 fin=stop LAST_LINE='\\boxed{17}'
+
+================ SUMMARY ================
+total=32  terminated=27 (84%)  boxed=32 (100%)  extractable_correct=25 (78%)
