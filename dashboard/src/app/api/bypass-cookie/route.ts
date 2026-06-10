@@ -49,6 +49,11 @@ export async function GET() {
     {
       hasCookie: !!s.cookie,
       cookieCount: s.cookie ? cookieCount(s.cookie) : 0,
+      // Names only (no values) — diagnostic to confirm the Vercel clearance
+      // cookie (e.g. _vcrcs) is actually present in what the extension forwards.
+      cookieNames: s.cookie
+        ? s.cookie.split(';').map((c) => c.split('=')[0].trim()).filter(Boolean)
+        : [],
       userAgent: s.userAgent,
       updatedAt: s.updatedAt || null,
       ageSeconds: s.updatedAt ? Math.round((Date.now() - s.updatedAt) / 1000) : null,

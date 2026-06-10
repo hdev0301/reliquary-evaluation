@@ -321,6 +321,24 @@ main {
   margin-top: 10px;
   font-size: 11px;
 }
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.toggle-row input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.toggle-hint {
+  font-size: 11px;
+}
 
 .panel-list {
   display: flex;

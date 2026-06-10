@@ -72,15 +72,6 @@ export default function MultiMinerDashboard({ urlHotkeys, fallbackHotkey }: Prop
     }
   }, [hotkeys, hydrated])
 
-  useEffect(() => {
-    if (!hydrated) return
-    try {
-      localStorage.setItem(AUTOPULL_KEY, autoPullTop ? '1' : '0')
-    } catch {
-      // ignore
-    }
-  }, [autoPullTop, hydrated])
-
   const addHotkey = useCallback((hk: string): boolean => {
     const trimmed = hk.trim()
     if (!SS58_REGEX.test(trimmed)) return false
@@ -110,10 +101,9 @@ export default function MultiMinerDashboard({ urlHotkeys, fallbackHotkey }: Prop
   // Auto-add the current top 3 hotkeys (by accepted sample count over the last
   // 5 windows): once the stored list has hydrated, then refreshed every 10
   // minutes so newly-rising miners get pulled in. addHotkey() dedupes, so any
-  // hotkey already shown is skipped — no duplication. Gated by autoPullTop: when
-  // off, the effect doesn't run, so no /api/top-hotkeys requests are made.
+  // hotkey already shown is skipped — no duplication.
   useEffect(() => {
-    if (!hydrated || !autoPullTop) return
+    if (!hydrated) return
     const REFRESH_MS = 10 * 60 * 1000 // 10 minutes
     let cancelled = false
 
@@ -137,16 +127,11 @@ export default function MultiMinerDashboard({ urlHotkeys, fallbackHotkey }: Prop
       cancelled = true
       clearInterval(timer)
     }
-  }, [hydrated, autoPullTop, addHotkey])
+  }, [hydrated, addHotkey])
 
   return (
     <>
-      <HotkeyManager
-        hotkeys={hotkeys}
-        onAdd={addHotkey}
-        autoPullTop={autoPullTop}
-        onAutoPullChange={setAutoPullTop}
-      />
+      <HotkeyManager hotkeys={hotkeys} onAdd={addHotkey} />
       {hotkeys.map((hk) => (
         <HotkeyController key={hk} hotkey={hk} onSnapshot={updateSnapshot} />
       ))}
