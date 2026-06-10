@@ -1,0 +1,19 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Generating train split:   0%|          | 0/13972791 [00:00<?, ? examples/s]Generating train split:   0%|          | 49000/13972791 [00:00<00:28, 484191.51 examples/s]Generating train split:   1%|          | 114000/13972791 [00:00<00:23, 579072.13 examples/s]Generating train split:   1%|▏         | 182000/13972791 [00:00<00:22, 620495.56 examples/s]Generating train split:   2%|▏         | 248000/13972791 [00:00<00:22, 603705.76 examples/s]Generating train split:   2%|▏         | 317000/13972791 [00:00<00:21, 630154.63 examples/s]Generating train split:   3%|▎         | 386000/13972791 [00:00<00:21, 646885.26 examples/s]Generating train split:   3%|▎         | 485650/13972791 [00:00<00:20, 651326.79 examples/s]Generating train split:   4%|▍         | 554650/13972791 [00:00<00:20, 658079.72 examples/s]Generating train split:   5%|▍         | 645650/13972791 [00:01<00:20, 637303.20 examples/s]Generating train split:   5%|▌         | 724650/13972791 [00:01<00:20, 648988.54 examples/s]Generating train split:   6%|▌         | 791650/13972791 [00:01<00:20, 652007.76 examples/s]Generating train split:   6%|▌         | 859650/13972791 [00:01<00:20, 655280.15 examples/s]Generating train split:   6%|▋         | 873300/13972791 [00:01<00:20, 639398.49 examples/s]
+dataset rows (shards loaded) = 873300
+
+SUB-POOLS:
+  numeric (decimal-ambiguous, gsm8k/aug_gsm8k) :   14837  {'decimal': '14837 (100%)'}
+  symbolic (non-int, augmented_math)           :  192473  {'fraction': '10088 (50%)', 'var/text': '3103 (16%)', 'other': '2212 (11%)', 'radical': '2092 (10%)', 'decimal': '1950 (10%)', 'pi': '463 (2%)', 'int': '92 (0%)'}
+  integer slice available (gsm8k/aug_gsm8k)    :  136058
+
+ACTIVE COMBINED POOL  inzone_pool_v2.json : 148369 idxs  (sym_ratio=0.65 int_ratio=0.25)
+  composition: {'fraction': '48731 (33%)', 'int': '37576 (25%)', 'decimal': '24367 (16%)', 'var/text': '14217 (10%)', 'other': '10991 (7%)', 'radical': '10117 (7%)', 'pi': '2370 (2%)'}
+  sample answers: ['129.4', '\\frac{1}{2}', '\\frac{10}{3}', '[0, \\infty)', '36', '36', '-\\frac{23}{2}', '\\frac{7}{11}', '\\frac{3}{2}', '4\\sqrt{A}', '40', '2\\sqrt{5}', '(-2, -\\frac{1}{2}] \\cup (2, \\infty)', '315']
+
+WINNER ORACLE (target distribution, from cached accepted in-zone groups):
+  B/D ~55% decimal / ~45% int ; C ~44% symbolic ; (A laggard 72% int)
+  -> v2 numeric pool is decimal-pure (the scarce high-value side); the screen/curation
+     supplies the wrong rollouts. Dial --int-ratio up toward ~0.45 to match winner mix
+     of accepts if discovery starves on decimals alone.
+BUILD_EXIT=0

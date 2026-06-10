@@ -1,0 +1,121 @@
+================================================================================
+NETWORK CONTEXT  netuid=81  network=finney  model=subtensor:finney:netuid81
+current_window: {"window": 11614, "block_start": 11614, "block_end": 11614, "total_miners": 256, "total_rollouts": 8, "total_accepted": 8, "total_unique": 8, "hard_failed": 0, "soft_failed": 0, "copycat_rejections": 0, "digest_rejections": 0, "avg_score": 0.0039056539444571603, "top_hotkey": "5HQbAQ4UE8HLkwjWK8mcg7
+total miners: 256  active: 24
+
+--- TOP 12 BY SCORE ---
+ rk  uid    score   emis%     dTAO   cumTAO trend  succ%  uniq  part  hotkey
+  1   15   0.5000  50.00%      0.0     1.86    up 100.0%  1.00  0.10  5Hp6EPJd1zcXgC
+  2  238   0.2500  25.00%      0.0     0.45    up 100.0%  1.00  0.04  5DLftG4RTGveN4
+  3   22   0.1250  12.50%      0.0     0.45    up 100.0%  1.00  0.04  5DLzu4tWRAZMBs
+  4   44   0.1250  12.50%      0.0     0.12    up 100.0%  1.00  0.01  5DqNF7UecVuZNw
+  5    0   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5F9uEDDovurwEJ
+  6    1   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5GWEAXSg5RKV9t
+  7    2   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5FURyEnPFUk3vm
+  8    3   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5Dc8Z6bxzoy665
+  9    4   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5FqWBSMBN7bnvd
+ 10    5   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5EWSmWEDZ7poLK
+ 11    6   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5Fnx48i6A6KtN9
+ 12    7   0.0000   0.00%      0.0     0.00  flat   0.0%  0.00  0.00  5DyW8RC13cVLqu
+
+--- TARGET RANKS (by score) ---
+  A_5F6VZ2: rank 245/256  hk=5F6VZ2roP7ikDQnfzaHUwi54bYL4hmcTBqaPSgzraZ2rMMmy
+  B_5DARq6: rank 243/256  hk=5DARq6byGXr9WjB3Ak591RoBGdewpxurM4irnYunTxTWzAai
+  C_5HEAK6: rank 240/256  hk=5HEAK6g3VN6rZUMC1Xe2zn28p78Mxxd3Mih4kZaFE28D5S7E
+  D_5HQbAQ4: rank 242/256  hk=5HQbAQ4UE8HLkwjWK8mcg7tLWciWDR3LGtA11XV8NQvBcA4K
+
+================================================================================
+PROFILE A_5F6VZ2  uid=39 hk=5F6VZ2roP7ikDQnfzaHUwi54bYL4hmcTBqaPSgzraZ2rMMmy
+  coldkey=5D2wifXgQSrrDoAf4U9uTAfjRJYNeVLvLURzfbeoES96AFYb
+  rank(api)=245  rank(by_score)=245  score=0  status=active
+  trend=down slope=-0.0278  participation=0.583  streak=0 stability=0
+  share_of_emission=0  est_daily_tao=371.07513422  cumulative_tao=6.715705128205127
+  success_rate=0 unique_ratio=0 avg_reward=0 rollout_count=0
+  upload_lag_p50=21158.536865234375 p95=23004.308837890625  resp_p50=16528.694923967123 p95=17954.573722090572
+  last_seen=2026-06-03T15:34:27.000Z
+  HISTORY (27 windows): scores= [0.125, 0.125, 0.25, 0.125, 0.25, 0.125, 0.375, 0.222, 0.125, 0.111, 0.125, 0.125, 0.25, 0.1, 0.125, 0.125, 0.125, 0.125, 0.125, 0.375, 0.25, 0.667, 0.462, 0.5, 0.5, 0.467, 0.438]
+    score mean=0.2487 max=0.6667 min=0.1000 nonzero_windows=27/27
+  WINDOW_DETAIL (42 windows): submitted=172 accepted=72 acc_rate=41.86% soft_fail=95 hard_fail=0
+    per-window accepted dist={0: 15, 1: 14, 2: 5, 3: 2, 6: 2, 7: 2, 8: 2}  max=8
+    reject reasons (window-level)={'out_of_zone': 64, 'batch_filled': 19, 'miner:batch_filled': 5, 'logprob_mismatch': 2, 'boxed_answer_tampered': 1}
+  SAMPLES collected=72
+    reward dist={1: 72}
+    completion_length: n=72 mean=357 median=309 min=196 max=932
+    eos_terminated: 72/72 = 100.0%
+    sigma values={0.433: 69, 0.4841: 2, 0.5: 1}
+    distinct prompt_idx=72 / total samples_with_idx=72  reused_idx_count=0 (top reuse [(349382, 1), (116115, 1), (565397, 1)])
+    prompt_idx range: min=3506 max=854137
+    ground_truth formats (n=72): plain_int=72% decimal=22% fraction=4% radical=0% pi=0% text=0% tuple=3% matrix=0% hasvar=0%
+    prompt topics={'other': 37, 'wordprob': 30, 'prob/pct': 3, 'trig': 2, 'geom/coord': 2, 'seq/series': 1}
+
+================================================================================
+PROFILE B_5DARq6  uid=203 hk=5DARq6byGXr9WjB3Ak591RoBGdewpxurM4irnYunTxTWzAai
+  coldkey=5F9va7gvivsBbnG6kmGRqpW2XPMnWHYBsXzAWEHtmkAbbmY1
+  rank(api)=243  rank(by_score)=243  score=0  status=active
+  trend=up slope=0.0045  participation=0.597  streak=0 stability=0
+  share_of_emission=0  est_daily_tao=413.29838101999997  cumulative_tao=13.628586691086692
+  success_rate=0 unique_ratio=0 avg_reward=0 rollout_count=0
+  upload_lag_p50=18431.95849609375 p95=30435.54638671875  resp_p50=18431.958383880556 p95=25679.449141025543
+  last_seen=2026-06-03T15:48:48.000Z
+  HISTORY (41 windows): scores= [0.5, 0.75, 0.5, 0.25, 0.25, 0.5, 0.375, 0.5, 0.25, 0.5, 0.375, 0.375, 0.5, 0.5, 0.375, 0.375, 0.25, 0.222, 0.375, 0.25, 0.375, 0.5, 0.1, 0.375, 0.375, 0.375, 0.375, 0.375, 0.25, 0.375, 0.375, 0.25, 0.125, 0.375, 0.25, 0.125, 0.231, 0.062, 0.067, 0.071, 0.25]
+    score mean=0.3324 max=0.7500 min=0.0625 nonzero_windows=41/41
+  WINDOW_DETAIL (43 windows): submitted=136 accepted=114 acc_rate=83.82% soft_fail=21 hard_fail=0
+    per-window accepted dist={0: 2, 1: 6, 2: 9, 3: 16, 4: 9, 6: 1}  max=6
+    reject reasons (window-level)={'out_of_zone': 40, 'batch_filled': 19, 'logprob_mismatch': 2, 'boxed_answer_tampered': 1, 'miner:boxed_answer_tampered': 1}
+  SAMPLES collected=114
+    reward dist={1: 114}
+    completion_length: n=114 mean=440 median=462 min=194 max=510
+    eos_terminated: 114/114 = 100.0%
+    sigma values={0.433: 25, 0.4841: 19, 0.5: 70}
+    distinct prompt_idx=114 / total samples_with_idx=114  reused_idx_count=0 (top reuse [(363903, 1), (442835, 1), (177163, 1)])
+    prompt_idx range: min=6091 max=870729
+    ground_truth formats (n=114): plain_int=46% decimal=54% fraction=0% radical=0% pi=0% text=0% tuple=0% matrix=0% hasvar=0%
+    prompt topics={'other': 60, 'wordprob': 53, 'prob/pct': 1, 'poly/factor': 1}
+
+================================================================================
+PROFILE C_5HEAK6  uid=181 hk=5HEAK6g3VN6rZUMC1Xe2zn28p78Mxxd3Mih4kZaFE28D5S7E
+  coldkey=5HTPYEDYFCwKouFwHZp6VMQqPqKHv7T8rXPBy411Cf4c3N3o
+  rank(api)=240  rank(by_score)=240  score=0  status=active
+  trend=down slope=-0.0117  participation=0.625  streak=0 stability=0.32845144441112795
+  share_of_emission=0  est_daily_tao=139.62138796  cumulative_tao=8.663369963369963
+  success_rate=0 unique_ratio=0 avg_reward=0 rollout_count=0
+  upload_lag_p50=9443.63134765625 p95=17871.335693359375  resp_p50=10272.900649346411 p95=14181.85244151391
+  last_seen=2026-06-03T15:56:49.000Z
+  HISTORY (45 windows): scores= [0.125, 0.25, 0.125, 0.25, 0.125, 0.125, 0.125, 0.125, 0.25, 0.111, 0.125, 0.222, 0.125, 0.125, 0.1, 0.125, 0.25, 0.125, 0.375, 0.125, 0.2, 0.188, 0.25, 0.143, 0.25, 0.333, 0.286, 0.267, 0.188, 0.3, 0.067, 0.286, 0.188, 0.25, 0.214, 0.154, 0.167, 0.214, 0.067, 0.267, 0.062, 0.267, 0.25, 0.25, 0.25]
+    score mean=0.1925 max=0.3750 min=0.0625 nonzero_windows=45/45
+  WINDOW_DETAIL (45 windows): submitted=103 accepted=103 acc_rate=100.00% soft_fail=0 hard_fail=0
+    per-window accepted dist={1: 17, 2: 8, 3: 10, 4: 10}  max=4
+    reject reasons (window-level)={'out_of_zone': 232, 'logprob_mismatch': 1, 'boxed_answer_tampered': 1}
+  SAMPLES collected=103
+    reward dist={1: 103}
+    completion_length: n=103 mean=946 median=830 min=336 max=1960
+    eos_terminated: 103/103 = 100.0%
+    sigma values={0.433: 23, 0.4841: 52, 0.5: 28}
+    distinct prompt_idx=103 / total samples_with_idx=103  reused_idx_count=0 (top reuse [(369656, 1), (250262, 1), (144358, 1)])
+    prompt_idx range: min=29503 max=853673
+    ground_truth formats (n=103): plain_int=41% decimal=13% fraction=23% radical=6% pi=3% text=3% tuple=13% matrix=2% hasvar=12%
+    prompt topics={'other': 51, 'prob/pct': 13, 'trig': 12, 'geom/coord': 12, 'wordprob': 9, 'radical': 8, 'poly/factor': 4, 'matrix/vec': 3, 'seq/series': 2, 'complex': 2, 'logexp': 2}
+
+================================================================================
+PROFILE D_5HQbAQ4  uid=226 hk=5HQbAQ4UE8HLkwjWK8mcg7tLWciWDR3LGtA11XV8NQvBcA4K
+  coldkey=5D4krZeDTQENFbkcg4jQnerEb7URBZKP1MpY4C1VAmGWxSUd
+  rank(api)=242  rank(by_score)=242  score=0  status=active
+  trend=up slope=0.0012  participation=0.847  streak=0 stability=0
+  share_of_emission=0  est_daily_tao=552.34141066  cumulative_tao=17.143070818070818
+  success_rate=0 unique_ratio=0 avg_reward=0 rollout_count=0
+  upload_lag_p50=21300.85546875 p95=31066.39892578125  resp_p50=21276.348318206146 p95=29375.50365831703
+  last_seen=2026-06-03T15:56:49.000Z
+  HISTORY (61 windows): scores= [0.375, 0.125, 0.125, 0.375, 0.25, 0.125, 0.5, 0.375, 0.625, 0.25, 0.375, 0.375, 0.375, 0.25, 0.25, 0.25, 0.75, 0.222, 0.5, 0.222, 0.5, 0.5, 0.25, 0.125, 0.1, 0.5, 0.375, 0.125, 0.25, 0.25, 0.125, 0.125, 0.125, 0.5, 0.125, 0.25, 0.375, 0.125, 0.25, 0.231, 0.467, 0.5, 0.062, 0.417, 0.357, 0.417, 0.25, 0.286, 0.067, 0.312, 0.2, 0.2, 0.071, 0.312, 0.125, 0.357, 0.071, 0.067, 0.267, 0.188, 0.25]
+    score mean=0.2810 max=0.7500 min=0.0625 nonzero_windows=61/61
+  WINDOW_DETAIL (60 windows): submitted=179 accepted=169 acc_rate=94.41% soft_fail=9 hard_fail=0
+    per-window accepted dist={1: 16, 2: 14, 3: 11, 4: 9, 5: 7, 6: 1, 7: 1, 8: 1}  max=8
+    reject reasons (window-level)={'out_of_zone': 195, 'batch_filled': 19, 'logprob_mismatch': 2, 'boxed_answer_tampered': 1, 'miner:logprob_mismatch': 1}
+  SAMPLES collected=169
+    reward dist={1: 169}
+    completion_length: n=169 mean=433 median=446 min=250 max=510
+    eos_terminated: 169/169 = 100.0%
+    sigma values={0.433: 46, 0.4841: 24, 0.5: 99}
+    distinct prompt_idx=169 / total samples_with_idx=169  reused_idx_count=0 (top reuse [(558367, 1), (129254, 1), (412687, 1)])
+    prompt_idx range: min=4910 max=862227
+    ground_truth formats (n=169): plain_int=45% decimal=55% fraction=0% radical=0% pi=0% text=0% tuple=0% matrix=0% hasvar=0%
+    prompt topics={'other': 87, 'wordprob': 78, 'prob/pct': 8, 'trig': 1}

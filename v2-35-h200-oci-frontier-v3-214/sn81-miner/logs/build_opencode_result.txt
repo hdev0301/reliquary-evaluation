@@ -1,0 +1,29 @@
+=== BUILD FINISHED (pid gone) ===
+--- last 25 log lines ---
+['2 (i)', '2 (i)', '7 (i)']
+[2, 2, 7]
+Traceback (most recent call last):
+  File "/root/sn81-miner/dataprep/build_opencode_pool.py", line 323, in <module>
+    main()
+  File "/root/sn81-miner/dataprep/build_opencode_pool.py", line 285, in main
+    rewards = list(ex.map(_grade_one, grade_tasks, chunksize=8))
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/process.py", line 642, in _chain_from_iterable_of_lists
+    for element in iterable:
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+concurrent.futures.process.BrokenProcessPool: A process in the process pool was terminated abruptly while the future was running or pending.
+(EngineCore pid=24245) INFO 06-05 16:46:12 [core.py:1238] Shutdown initiated (timeout=0)
+(EngineCore pid=24245) INFO 06-05 16:46:12 [core.py:1261] Shutdown complete
+[rank0]:[W605 16:46:13.747334172 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+--- pool file ---
+POOL NOT WRITTEN (build may have errored — see log)

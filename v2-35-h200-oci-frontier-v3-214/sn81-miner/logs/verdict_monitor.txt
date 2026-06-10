@@ -1,0 +1,29 @@
+booted PID=16258 ~15s | SUBMIT_DELAY_S in env: RELIQUARY_SUBMIT_DELAY_S=20
+t=90s | REAL verdicts ACC=0 REJ=0 | submit-acks=0 | recent t_since_fire=[]
+t=180s | REAL verdicts ACC=0 REJ=0 | submit-acks=0 | recent t_since_fire=[]
+t=270s | REAL verdicts ACC=0 REJ=0 | submit-acks=0 | recent t_since_fire=[]
+t=360s | REAL verdicts ACC=0 REJ=0 | submit-acks=1 | recent t_since_fire=[20.02,]
+t=450s | REAL verdicts ACC=0 REJ=3 | submit-acks=2 | recent t_since_fire=[28.35,32.56,36.72,]
+t=540s | REAL verdicts ACC=0 REJ=5 | submit-acks=2 | recent t_since_fire=[28.35,32.56,36.72,]
+t=630s | REAL verdicts ACC=0 REJ=5 | submit-acks=2 | recent t_since_fire=[28.35,32.56,36.72,]
+t=720s | REAL verdicts ACC=0 REJ=5 | submit-acks=2 | recent t_since_fire=[28.35,32.56,36.72,]
+=== FINAL — REAL /verdicts (SUBMIT_DELAY_S=20) ===
+verdict ACCEPTED: 0
+verdict REJECTED: 5
+reject reasons:
+      4 reason=batch_filled
+      1 reason=stale_round
+over= on real verdicts:
+      1 over=7
+      1 over=8
+      1 over=11
+      1 over=12
+fire timing t_since_window_seen (should be ~20 now):
+min=20.02 med=28.35 max=36.72 n=5
+-- any verdict ACCEPTED lines --
+-- last 8 real verdicts --
+2026-06-05 13:00:12 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12250 mr=8486ce77609c reason=stale_round | sub=29287014 arr=29287015 trig=None over=None tol=None stage=drand rank=None qwait=Nonems verify=Nonems total=416.1407947540283ms
+2026-06-05 13:00:22 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12250 mr=082ca798a742 reason=batch_filled | sub=29287016 arr=29287016 trig=29287005 over=11 tol=None stage=seal_extension rank=None qwait=Nonems verify=Nonems total=412.74547576904297ms
+2026-06-05 13:00:22 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12250 mr=8d0e445f1eec reason=batch_filled | sub=29287017 arr=29287017 trig=29287005 over=12 tol=None stage=seal_extension rank=None qwait=Nonems verify=Nonems total=310.20545959472656ms
+Processed prompts:   0%|          | 0/320 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts:  20%|██        | 64/320 [00:23<01:33,  2.74it/s, est. speed input: 257.97 toks/s, output: 1491.45 toks/s]Processed prompts:  40%|████      | 128/320 [00:28<00:37,  5.17it/s, est. speed input: 401.84 toks/s, output: 2908.74 toks/s]Processed prompts:  60%|██████    | 192/320 [00:31<00:16,  7.68it/s, est. speed input: 561.65 toks/s, output: 3869.22 toks/s]2026-06-05 13:02:37 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12250 mr=2f180f0681de reason=batch_filled | sub=29287012 arr=29287012 trig=29287005 over=7 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=156483.87098312378ms
+2026-06-05 13:02:37 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12250 mr=b0c4178abac5 reason=batch_filled | sub=29287013 arr=29287013 trig=29287005 over=8 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=152583.26196670532ms

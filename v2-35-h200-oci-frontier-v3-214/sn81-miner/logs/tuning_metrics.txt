@@ -1,0 +1,71 @@
+t=60s gpu_avg=48% max=87% mem=130079MiB pw=254.90W | acc=0 rej=2 batch_filled=4 fires=2
+t=120s gpu_avg=47% max=100% mem=130079MiB pw=259.17W | acc=0 rej=2 batch_filled=4 fires=2
+t=180s gpu_avg=47% max=100% mem=130079MiB pw=317.04W | acc=4 rej=2 batch_filled=4 fires=6
+t=240s gpu_avg=47% max=100% mem=130379MiB pw=507.13W | acc=5 rej=5 batch_filled=10 fires=10
+t=300s gpu_avg=45% max=100% mem=130379MiB pw=220.65W | acc=5 rej=5 batch_filled=15 fires=10
+t=360s gpu_avg=44% max=100% mem=130379MiB pw=327.47W | acc=5 rej=5 batch_filled=15 fires=10
+t=420s gpu_avg=43% max=100% mem=130379MiB pw=241.93W | acc=5 rej=5 batch_filled=15 fires=10
+MINER DIED at tick 87
+=== FINAL  gpu_util avg=43% max=100% over 86 samples ===
+-- verdicts --
+      5 accepted=False
+      5 accepted=True
+-- reject reasons --
+     15 reason=batch_filled
+      5 reason=submitted
+-- sigma --
+      4 sigma=0.433
+      6 sigma=0.484
+-- t_since_window_seen (fire lateness, sec) --
+min=0.00 median=16.48 max=92.06 n=10
+-- valid_subs buffer depth --
+      1 valid_subs=0
+      1 valid_subs=1
+      1 valid_subs=2
+      2 valid_subs=3
+      1 valid_subs=9
+      2 valid_subs=10
+      2 valid_subs=11
+-- screen promising ratios --
+      2 screen: 1/12 promising
+      2 screen: 2/12 promising
+      3 screen: 3/12 promising
+      1 screen: 4/12 promising
+-- kept per pregen batch --
+      4 kept=1
+      2 kept=2
+      1 kept=3
+-- over= seal contention --
+      1 over=0
+      1 over=1
+      1 over=20
+      1 over=22
+      1 over=23
+      1 over=29
+      1 over=3
+      1 over=31
+      1 over=4
+      1 over=6
+-- last 10 FIRE --
+2026-06-05 11:59:53 | MainThread | reliquary.miner.engine | INFO | FIRE win=12244 groups=1 t_since_window_seen=87.83s valid_subs=11
+2026-06-05 11:59:57 | MainThread | reliquary.miner.engine | INFO | FIRE win=12244 groups=1 t_since_window_seen=92.06s valid_subs=11
+2026-06-05 12:08:28 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=0.00s valid_subs=0
+2026-06-05 12:08:32 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=4.03s valid_subs=1
+2026-06-05 12:08:36 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=8.24s valid_subs=2
+2026-06-05 12:08:41 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=12.46s valid_subs=3
+2026-06-05 12:08:45 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=16.48s valid_subs=3
+2026-06-05 12:09:29 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=60.38s valid_subs=9
+2026-06-05 12:09:33 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=64.60s valid_subs=10
+2026-06-05 12:09:37 | MainThread | reliquary.miner.engine | INFO | FIRE win=12245 groups=1 t_since_window_seen=68.74s valid_subs=10
+-- last 12 verdicts --
+2026-06-05 11:59:54 | MainThread | reliquary.miner.engine | INFO | submitted window=12244 prompt=835597 sigma=0.484 round=29285809 accepted=False reason=batch_filled
+2026-06-05 11:59:58 | MainThread | reliquary.miner.engine | INFO | submitted window=12244 prompt=81150 sigma=0.484 round=29285811 accepted=False reason=batch_filled
+2026-06-05 12:08:29 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=826692 sigma=0.484 round=29285981 accepted=True reason=submitted
+2026-06-05 12:08:33 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=627724 sigma=0.484 round=29285982 accepted=True reason=submitted
+2026-06-05 12:08:37 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=835597 sigma=0.484 round=29285984 accepted=True reason=submitted
+2026-06-05 12:08:41 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=864010 sigma=0.433 round=29285985 accepted=True reason=submitted
+2026-06-05 12:08:45 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=746026 sigma=0.433 round=29285987 accepted=True reason=submitted
+Processed prompts:   0%|          | 0/288 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]2026-06-05 12:09:29 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=613005 sigma=0.433 round=29286001 accepted=False reason=batch_filled
+2026-06-05 12:09:33 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=230740 sigma=0.433 round=29286003 accepted=False reason=batch_filled
+2026-06-05 12:09:38 | MainThread | reliquary.miner.engine | INFO | submitted window=12245 prompt=81150 sigma=0.484 round=29286004 accepted=False reason=batch_filled
+hot=20 blocklist=15

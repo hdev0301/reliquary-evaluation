@@ -1,0 +1,12 @@
+ITER1 config: delay=20 k=2 pool=114k PID=17038
+t=90s | REAL ACCEPTED=0 REJECTED=19 | acks=7
+MINER DIED tick 32
+=== ITER1 FINAL (delay=20, k=2, 114k pool) ===
+verdict ACCEPTED: 0
+verdict REJECTED: 0
+reject reasons:
+over= dist:
+stage= dist:
+fire t_since_window_seen:
+-- accepted lines (if any) --
+-- last 6 real verdicts --

@@ -1,0 +1,73 @@
+=== build_frontier_pool 21:37:47 | hotkey=hdev0301 keep_frac=0.4 ===
+  [gradeable] 45265 prompts with cases (cache universe=45267)
+  [diverge] 133 verdicts, 35 divergent leads -> +12 new gradeable (total 31)
+  [canon] gradeable-divergent=45234, keep_frac=0.4 -> 18094 idxs (sha-prefix mean 8.59e+08 < 2.15e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 18094 idxs
+=== build_frontier_pool DONE 21:37:51 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=hdev0301 bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 23:10:14 | hotkey=hdev0301 keep_frac=0.4 ===
+  [gradeable] 18765 prompts with cases (cache universe=18765)
+  [diverge] 174 verdicts, 54 divergent leads -> +7 new gradeable (total 38)
+  [canon] gradeable-divergent=18727, keep_frac=0.4 -> 7491 idxs (sha-prefix mean 8.61e+08 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 7491 idxs
+=== build_frontier_pool DONE 23:10:15 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=hdev0301 bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 23:25:09 | hotkey=ronnywebdev_hotkey keep_frac=0.4 ===
+  [gradeable] 18765 prompts with cases (cache universe=18765)
+  [diverge] 160 verdicts, 36 divergent leads -> +28 new gradeable (total 66)
+  [canon] gradeable-divergent=18699, keep_frac=0.4 -> 7480 idxs (sha-prefix mean 8.61e+08 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 7480 idxs
+=== build_frontier_pool DONE 23:25:10 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 23:38:29 | hotkey=ronnywebdev_hotkey keep_frac=0.4 ===
+  [gradeable] 28660 prompts with cases (cache universe=28660)
+  [diverge] 160 verdicts, 36 divergent leads -> +2 new gradeable (total 68)
+  [canon] gradeable-divergent=28592, keep_frac=0.4 -> 11437 idxs (sha-prefix mean 8.61e+08 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 11437 idxs
+=== build_frontier_pool DONE 23:38:31 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 00:25:15 | hotkey=ronnywebdev_hotkey keep_frac=0.4 ===
+  [gradeable] 27588 prompts with cases AND prompt<=1200 chars (cache universe=28660)
+  [diverge] 174 verdicts, 36 divergent leads -> +0 new gradeable (total 68)
+  [canon] gradeable-divergent=27521, keep_frac=0.4 -> 11008 idxs (sha-prefix mean 8.57e+08 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 11008 idxs
+=== build_frontier_pool DONE 00:25:17 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 02:04:31 | hotkey=ronnywebdev_hotkey keep_frac=0.7 ===
+  [gradeable] 31474 prompts with cases AND prompt<=1200 chars (cache universe=32682)
+  [diverge] 200 verdicts, 34 divergent leads -> +5 new gradeable (total 73)
+  [canon] gradeable-divergent=31402, keep_frac=0.7 -> 21981 idxs (sha-prefix mean 1.51e+09 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 21981 idxs
+=== build_frontier_pool DONE 02:04:34 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 03:48:21 | hotkey=ronnywebdev_hotkey keep_frac=1.0 ===
+  [gradeable] 31474 prompts with cases AND prompt<=1200 chars (cache universe=32682)
+  [diverge] 200 verdicts, 34 divergent leads -> +9 new gradeable (total 82)
+  [canon] gradeable-divergent=31393, keep_frac=1.0 -> 31393 idxs (sha-prefix mean 2.16e+09 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 31393 idxs
+=== build_frontier_pool DONE 03:48:23 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 16:41:58 | hotkey=ronnywebdev_hotkey keep_frac=0.7 ===
+  [gradeable] 35214 prompts with cases AND prompt<=1200 chars (cache universe=36579)
+  [diverge] 88 verdicts, 0 divergent leads -> +0 new gradeable (total 82)
+  [canon] gradeable-divergent=35133, keep_frac=0.7 -> 24593 idxs (sha-prefix mean 1.51e+09 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 24593 idxs
+=== build_frontier_pool DONE 16:42:00 ===
+[bfp] restart the miner to USE the new pool:  HOTKEY=ronnywebdev_hotkey bash /root/sn81-miner/opencode/run_miner.sh
+=== build_frontier_pool 19:32:44 | hotkey=ronnywebdev_hotkey keep_frac=0.7 ===
+  [gradeable] 35214 prompts with cases AND prompt<=1200 chars (cache universe=36579)
+  [diverge] 46 verdicts, 0 divergent leads -> +0 new gradeable (total 82)
+  [overlay] /root/sn81-miner/opencode/data/inzone_pool_screened.json: 542 dense scatter idxs unioned first (+175 beyond the canon cut); pool now 24768
+  [canon] gradeable-divergent=35133, keep_frac=0.7 -> 24768 idxs (sha-prefix mean 1.52e+09 < 2.16e+09, lower = wins more seal ties)
+  WROTE /root/sn81-miner/opencode/data/inzone_pool_opencode.json: 24768 idxs
+=== build_frontier_pool DONE 19:32:46 ===
+[bfp] restarting miner to apply the new pool ...
+[bfp] miner restart launched (HOTKEY=ronnywebdev_hotkey).
+grader already running (socket /tmp/reliquary-grader.sock)
+[opencode] real-reward mode: subset=/root/sn81-miner/opencode/data/oci_local_subset + local grader
+[opencode] scatter-screened pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json (24768 idxs)
+=== OPENCODE launcher | pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | predict_blind=1 (min_windows=2 lead=1800ms) ===
+=== MODE=opencode | env=opencodeinstruct | pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | max_new=1024 | k=4 | curate=1 ===
+pool ok: 24768 idxs
+pool/env changed or pool rebuilt -> clearing hot pool /root/sn81-miner/opencode/data/hot_pool.json
+launched PID=2893333 | MODE=opencode env=opencodeinstruct pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | log=/root/sn81-miner/logs/miner.log

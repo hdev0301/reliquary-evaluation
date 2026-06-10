@@ -1,0 +1,558 @@
+=== grow_data START 23:25:45 | rounds=8 maxc=4000 seed_base=100 target=0 | cache=18765 ===
+--- round 1/8 seed=101 (cache=18765) 23:25:46 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=101 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 130 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~18895 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 2/8 seed=102 (cache=18895) 23:26:36 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=102 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 102 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~18997 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=18997) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 18997
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1915382.23 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1907438.20 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=18997
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 3/8 seed=103 (cache=18997) 23:27:25 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=103 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 95 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~19092 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 4/8 seed=104 (cache=19092) 23:28:11 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=104 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 1223 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/1223 (scanned 196322)
+  resolved 400/1223 (scanned 216410)
+  resolved 600/1223 (scanned 236719)
+  resolved 800/1223 (scanned 256484)
+  resolved 1000/1223 (scanned 280510)
+  resolved 1200/1223 (scanned 301082)
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~20315 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=20315) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 20315
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1805554.89 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1798463.23 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=20315
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 5/8 seed=105 (cache=20315) 23:29:39 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=105 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 2437 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/2437 (scanned 22169)
+  resolved 400/2437 (scanned 54903)
+  resolved 600/2437 (scanned 81933)
+  resolved 800/2437 (scanned 105676)
+  resolved 1000/2437 (scanned 128327)
+  resolved 1200/2437 (scanned 158362)
+  resolved 1400/2437 (scanned 182846)
+  resolved 1600/2437 (scanned 203912)
+  resolved 1800/2437 (scanned 226519)
+  resolved 2000/2437 (scanned 249939)
+  resolved 2200/2437 (scanned 276291)
+  resolved 2400/2437 (scanned 299834)
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~22752 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 6/8 seed=106 (cache=22752) 23:31:45 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=106 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 2112 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/2112 (scanned 25202)
+  resolved 400/2112 (scanned 64722)
+  resolved 600/2112 (scanned 94585)
+  resolved 800/2112 (scanned 119548)
+  resolved 1000/2112 (scanned 152742)
+  resolved 1200/2112 (scanned 182231)
+  resolved 1400/2112 (scanned 202390)
+  resolved 1600/2112 (scanned 229853)
+  resolved 1800/2112 (scanned 257367)
+  resolved 2000/2112 (scanned 288210)
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~24864 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=24864) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 24864
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1758514.80 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1751757.90 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=24864
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 7/8 seed=107 (cache=24864) 23:33:43 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=107 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 2004 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/2004 (scanned 24836)
+  resolved 400/2004 (scanned 65387)
+  resolved 600/2004 (scanned 98520)
+  resolved 800/2004 (scanned 129135)
+  resolved 1000/2004 (scanned 163405)
+  resolved 1200/2004 (scanned 188950)
+  resolved 1400/2004 (scanned 217931)
+  resolved 1600/2004 (scanned 248781)
+  resolved 1800/2004 (scanned 275104)
+  resolved 2000/2004 (scanned 302898)
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~26868 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 8/8 seed=108 (cache=26868) 23:35:36 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=4000 m=16 seed=108 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 4000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 1792 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/1792 (scanned 25170)
+  resolved 400/1792 (scanned 69496)
+  resolved 600/1792 (scanned 106503)
+  resolved 800/1792 (scanned 146193)
+  resolved 1000/1792 (scanned 184688)
+  resolved 1200/1792 (scanned 212048)
+  resolved 1400/1792 (scanned 245475)
+  resolved 1600/1792 (scanned 275928)
+usable (have structured cases): 4000/4000
+
+cases-only: cached 4000 usable case-sets this run (cache now ~28660 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=28660) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 28660
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1643793.70 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1637299.94 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=28660
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+    [grow] rebuilding local subset (cache=28660) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 28660
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1580263.58 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1574119.36 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=28660
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+=== grow_data DONE 23:37:26 | final cache=28660 ===
+[grow] NOTE: restart the miner to USE the new data:  bash /root/sn81-miner/opencode/run_miner.sh
+=== grow_data START 01:14:21 | rounds=8 maxc=6000 seed_base=100 target=0 | cache=28660 ===
+--- round 1/8 seed=101 (cache=28660) 01:14:22 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=101 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~28660 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 2/8 seed=102 (cache=28660) 01:14:29 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=102 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~28660 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=28660) ...
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 28660
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1552652.35 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1545933.83 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=28660
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 3/8 seed=103 (cache=28660) 01:14:44 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=103 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~28660 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 4/8 seed=104 (cache=28660) 01:14:51 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=104 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 484 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/484 (scanned 238415)
+  resolved 400/484 (scanned 293769)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~29144 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=29144) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 29144
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1477002.82 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1471334.56 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=29144
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 5/8 seed=105 (cache=29144) 01:16:19 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=105 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 948 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/948 (scanned 80683)
+  resolved 400/948 (scanned 144863)
+  resolved 600/948 (scanned 213811)
+  resolved 800/948 (scanned 273340)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~30092 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 6/8 seed=106 (cache=30092) 01:17:49 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=106 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 922 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/922 (scanned 77833)
+  resolved 400/922 (scanned 151451)
+  resolved 600/922 (scanned 211314)
+  resolved 800/922 (scanned 281099)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~31014 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=31014) ...
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 31014
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1657067.91 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1651040.78 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=31014
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 7/8 seed=107 (cache=31014) 01:19:08 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=107 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 804 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/804 (scanned 85899)
+  resolved 400/804 (scanned 169881)
+  resolved 600/804 (scanned 243339)
+  resolved 800/804 (scanned 302195)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~31818 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 8/8 seed=108 (cache=31818) 01:20:24 ---
+=== opencode pool build | ckpt=f2b3806ed1401a04b361c62de748fc193cd318a7 | cand=6000 m=16 seed=108 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 864 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/864 (scanned 67635)
+  resolved 400/864 (scanned 154805)
+  resolved 600/864 (scanned 226453)
+  resolved 800/864 (scanned 292064)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1620435.95 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1613802.13 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1572714.59 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1566500.09 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+=== grow_data DONE 01:21:45 | final cache=32682 ===
+[grow] NOTE: restart the miner to USE the new data:  bash /root/sn81-miner/opencode/run_miner.sh
+=== grow_data START 04:00:03 | rounds=10 maxc=6000 seed_base=100 target=0 | cache=32682 ===
+--- round 1/10 seed=101 (cache=32682) 04:00:04 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=101 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 2/10 seed=102 (cache=32682) 04:00:11 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=102 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1640373.57 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1633563.12 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 3/10 seed=103 (cache=32682) 04:00:21 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=103 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 4/10 seed=104 (cache=32682) 04:00:28 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=104 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1544977.16 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1538900.47 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 5/10 seed=105 (cache=32682) 04:00:38 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=105 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 6/10 seed=106 (cache=32682) 04:00:45 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=106 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1576367.48 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1570735.65 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 7/10 seed=107 (cache=32682) 04:00:55 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=107 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 8/10 seed=108 (cache=32682) 04:01:02 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=108 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~32682 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=32682) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 32682
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1587729.11 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1582099.51 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=32682
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+--- round 9/10 seed=109 (cache=32682) 04:01:12 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=109 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 2019 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/2019 (scanned 23543)
+  resolved 400/2019 (scanned 61608)
+<unknown>:2: SyntaxWarning: invalid escape sequence '\$'
+  resolved 600/2019 (scanned 90685)
+  resolved 800/2019 (scanned 116734)
+  resolved 1000/2019 (scanned 151915)
+  resolved 1200/2019 (scanned 181770)
+  resolved 1400/2019 (scanned 208378)
+  resolved 1600/2019 (scanned 237616)
+  resolved 1800/2019 (scanned 267712)
+  resolved 2000/2019 (scanned 299474)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~34701 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+--- round 10/10 seed=110 (cache=34701) 04:03:12 ---
+=== opencode pool build | ckpt=68aa814cf590b27a632a4ff7f0ff9b6ba1050c95 | cand=6000 m=16 seed=110 | out=/root/sn81-miner/opencode/data ===
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 1878 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/1878 (scanned 28432)
+  resolved 400/1878 (scanned 71302)
+  resolved 600/1878 (scanned 104386)
+  resolved 800/1878 (scanned 141700)
+  resolved 1000/1878 (scanned 174523)
+  resolved 1200/1878 (scanned 200548)
+  resolved 1400/1878 (scanned 227977)
+  resolved 1600/1878 (scanned 256468)
+  resolved 1800/1878 (scanned 286597)
+usable (have structured cases): 6000/6000
+
+cases-only: cached 6000 usable case-sets this run (cache now ~36579 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
+=== done -> pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json | log: /root/sn81-miner/opencode/logs/build_opencode.log ===
+    [grow] rebuilding local subset (cache=36579) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 36579
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1489602.66 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1484331.07 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=36579
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+    [grow] rebuilding local subset (cache=36579) ...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows = 50000
+reconstructed case-sets available: 36579
+Saving the dataset (0/1 shards):   0%|          | 0/50000 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1496020.89 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 50000/50000 [00:00<00:00, 1490672.07 examples/s]
+
+wrote local subset: /root/sn81-miner/opencode/data/oci_local_subset
+  rows=50000 (index-aligned with mirror)  rows_with_cases=36579
+
+MINE IT:  RELIQUARY_OCI_PROMPT_ONLY=0  RELIQUARY_OCI_SUBSET_REPO=/root/sn81-miner/opencode/data/oci_local_subset
+          (start the local grader first: bash /root/sn81-miner/opencode/grader.sh start)
+=== grow_data DONE 04:05:12 | final cache=36579 ===
+[grow] NOTE: restart the miner to USE the new data:  bash /root/sn81-miner/opencode/run_miner.sh
