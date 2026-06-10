@@ -35,7 +35,7 @@ OUTPUTS (under data/):
 Run:  cd /root/reliquary && .venv/bin/python /root/sn81-miner/dataprep/build_inzone_v2.py
 Knobs (argv or env): --sym-ratio 0.25  --int-ratio 0.0  --max-prompt-len 400
 """
-import argparse, hashlib, json, os, re, sys
+import argparse, json, os, re, sys
 from collections import Counter
 
 import numpy as np
@@ -46,31 +46,6 @@ from reliquary.environment.openmathinstruct import _normalize_answer
 
 DATA = "/root/sn81-miner/data"
 DIAG = "/root/sn81-miner/diagnostics"
-
-
-def _canonical_key(prompt_idx: int) -> bytes:
-    """Byte-for-byte match of the validator's _prompt_canonical_key
-    (reliquary/validator/batch_selection.py) and the miner's _canonical_key
-    (reliquary/miner/pregen.py): sha256 of prompt_idx as 8-byte big-endian.
-    At seal the validator fills the boundary round with the B_BATCH DISTINCT
-    prompts of LOWEST digest, so low-hash prompts win the canonical top-8."""
-    return hashlib.sha256(int(prompt_idx).to_bytes(8, "big", signed=False)).digest()
-
-
-def canon_filter(idxs, keep_frac):
-    """Keep only the lowest-sha256(prompt_idx) `keep_frac` of `idxs` — the prompts
-    most likely to land in the validator's canonical top-B_BATCH at seal, which is
-    what reduces `batch_filled` rejects. keep_frac >= 1.0 is a no-op.
-
-    Caveat: aggressive values shrink the pool toward the few globally-lowest-hash
-    prompts that EVERY canon-aware miner converges on -> higher per-prompt
-    collision (the boundary round splits a slot's reward across same-prompt
-    submitters). 0.2-0.4 is a reasonable advantage-vs-collision trade."""
-    if keep_frac >= 1.0:
-        return idxs
-    ordered = sorted(idxs, key=_canonical_key)
-    n_keep = max(1, int(round(len(ordered) * keep_frac)))
-    return sorted(int(i) for i in ordered[:n_keep])
 
 
 def regex_mask(col, pattern):
@@ -88,19 +63,21 @@ def main():
                     help="symbolic idxs as a fraction of the combined pool (C-style diversification)")
     ap.add_argument("--int-ratio", type=float, default=float(os.environ.get("V2_INT_RATIO", "0.30")),
                     help="plain-integer idxs as a fraction of the combined pool (bimodal-prone; hedge)")
+    ap.add_argument("--basen-ratio", type=float, default=float(os.environ.get("V2_BASEN_RATIO", "0.12")),
+                    help="base-N format-ambiguous INTEGER idxs ('express N in base 7' -> answer like 1010100) as a "
+                         "fraction of the pool. They LOOK integer but SCATTER (model emits base-10 vs base-N) and are "
+                         "5HEAK6's ~22pct 'int' wins -- caught by neither --int-ratio (gsm) nor symbolic (is_int).")
     ap.add_argument("--max-prompt-len", type=int, default=600,
-                    help="max problem CHARS (prompt filter). 5HEAK6 mines prompts up to ~1078 chars; 400 was "
-                         "too restrictive (p95=417), 600 captures nearly all of the winners' prompt distribution.")
-    ap.add_argument("--include-math-source", action=argparse.BooleanOptionalAction, default=True,
-                    help="include the base `math` competition split (not just augmented_math) in the SYMBOLIC pool. "
-                         "5HEAK6's radical/complex/interval symbolic wins live partly in `math`, which the "
-                         "augmented_math-only mask missed. Use --no-include-math-source for the old behavior.")
+                    help="max problem CHARS. 5HEAK6 mines prompts up to ~1078 (p95=417); 600 captures nearly all "
+                         "and lets the longer base-conversion prompts through.")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--canon-keep-frac", type=float,
-                    default=float(os.environ.get("V2_CANON_KEEP_FRAC", "1.0")),
-                    help="Keep only the lowest-sha256(prompt_idx) fraction of the ACTIVE pool. These win the "
-                         "validator's boundary-round canonical top-8 (batch_selection.py) more often, cutting "
-                         "batch_filled losses. 1.0=off; try 0.2-0.4. Lower => more low-hash collision.")
+    ap.add_argument("--out-tag", type=str, default="",
+                    help="suffix for the output filenames: --out-tag fast -> inzone_pool_v2_fast.json. Lets the "
+                         "throughput pool (MODE=symbolic-fast) coexist with the deep-symbolic inzone_pool_v2.json.")
+    ap.add_argument("--full-symbolic", action="store_true",
+                    help="include ALL symbolic idxs (no sampling); symbolic becomes the pool base for max coverage")
+    ap.add_argument("--seed-file", type=str, default=None,
+                    help="JSON list of extra prompt idxs to UNION in (e.g. proven-winner idxs from a top miner)")
     args = ap.parse_args()
 
     env = load_environment("openmathinstruct")
@@ -119,11 +96,9 @@ def main():
     is_decimal_ambig = pc.and_(is_dec_full, pc.invert(is_dec_zero))
 
     src_numeric = pc.is_in(src, value_set=pa.array(["gsm8k", "augmented_gsm8k"]))
-    # SYMBOLIC source: augmented_math always; add the base `math` competition split when
-    # --include-math-source (default). 5HEAK6's radical/complex/interval wins live partly in `math`,
-    # which the old augmented_math-only mask excluded entirely.
-    _sym_srcs = ["augmented_math", "math"] if args.include_math_source else ["augmented_math"]
-    src_math = pc.is_in(src, value_set=pa.array(_sym_srcs))
+    # C engine: hard symbolic sources. Includes the original "math" competition set
+    # (5HEAK6 banks ~9% of accepts from it) in addition to augmented_math.
+    src_math = pc.is_in(src, value_set=pa.array(["augmented_math", "math"]))
 
     # B/D engine: decimal-ambiguous answers on the numeric (gsm8k-style) sources
     numeric_mask = pc.and_(pc.and_(is_decimal_ambig, src_numeric), pc.and_(len_ok, nonempty))
@@ -132,6 +107,21 @@ def main():
     symbolic_mask = pc.and_(pc.and_(pc.invert(is_int), src_math), pc.and_(len_ok, nonempty))
     # optional integer slice (reasoning-difficulty in-zone, but bimodal-prone)
     integer_mask = pc.and_(pc.and_(is_int, src_numeric), len_ok)
+    # base-N format-ambiguous INTEGERS: integer-valued answers to base-conversion problems
+    # ("express N in base 7" -> answer "1010100"). They look like plain ints (so the symbolic
+    # NON-int mask skips them) but come from the math source (so the gsm-only integer_mask skips
+    # them too) -- the exact 22% "int" slice 5HEAK6 wins. The model scatters base-10 vs base-N
+    # -> natural in-zone variance. Gate on a base-conversion KEYWORD in the prompt so we don't
+    # pull plain-arithmetic integers (bimodal). "binary" requires a number-word to dodge
+    # "binary operation / tree / search".
+    prob_lower = pc.utf8_lower(prob)
+    basen_kw = regex_mask(
+        prob_lower,
+        r"base[ \-_]?(\d|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|sixteen)"
+        r"|\boctal\b|hexadecimal|\bradix\b"
+        r"|binary (number|representation|form|notation|expansion|equivalent|digit|string)",
+    )
+    basen_mask = pc.and_(pc.and_(is_int, src_math), pc.and_(basen_kw, pc.and_(len_ok, nonempty)))
 
     def idxs_of(mask):
         m = mask.combine_chunks().to_numpy(zero_copy_only=False)
@@ -140,29 +130,51 @@ def main():
     numeric = idxs_of(numeric_mask)
     symbolic = idxs_of(symbolic_mask)
     integers = idxs_of(integer_mask)
+    basen = idxs_of(basen_mask)
 
     rng = np.random.default_rng(args.seed)
 
-    # ---- combined ACTIVE pool: numeric is the base; mix in symbolic + optional ints
-    # to the requested composition. numeric is the scarce/high-value side -> it sets
-    # the base size; sym/int counts are derived from the ratios.
-    base = len(numeric)
-    # solve for total T s.t. numeric/T = 1 - sym_ratio - int_ratio
-    keep_frac = max(1e-6, 1.0 - args.sym_ratio - args.int_ratio)
-    total = int(round(base / keep_frac))
-    n_sym = min(len(symbolic), int(round(total * args.sym_ratio)))
-    n_int = min(len(integers), int(round(total * args.int_ratio)))
+    # ---- combined ACTIVE pool
+    if args.full_symbolic:
+        # MAX COVERAGE: take ALL symbolic (no sampling), all numeric (scarce), and an
+        # integer slice sized so symbolic == sym_ratio of the pool. Trade-off: the
+        # 14837 decimal-ambiguous prompts can't grow, so decimal share shrinks as the
+        # pool grows -- coverage over composition-purity.
+        n_sym = len(symbolic)
+        total = int(round(n_sym / max(1e-6, args.sym_ratio)))
+        n_int = min(len(integers), int(round(total * args.int_ratio)))
+        n_basen = min(len(basen), int(round(total * args.basen_ratio)))
+        sym_sel = list(symbolic)
+    else:
+        # numeric is the base; mix in symbolic + optional ints to the requested ratios.
+        base = len(numeric)
+        # solve for total T s.t. numeric/T = 1 - sym_ratio - int_ratio - basen_ratio
+        keep_frac = max(1e-6, 1.0 - args.sym_ratio - args.int_ratio - args.basen_ratio)
+        total = int(round(base / keep_frac))
+        n_sym = min(len(symbolic), int(round(total * args.sym_ratio)))
+        n_int = min(len(integers), int(round(total * args.int_ratio)))
+        n_basen = min(len(basen), int(round(total * args.basen_ratio)))
+        sym_sel = list(rng.choice(symbolic, size=n_sym, replace=False)) if n_sym else []
 
-    sym_sel = list(rng.choice(symbolic, size=n_sym, replace=False)) if n_sym else []
     int_sel = list(rng.choice(integers, size=n_int, replace=False)) if n_int else []
-    combined = sorted(set(numeric) | set(int(i) for i in sym_sel) | set(int(i) for i in int_sel))
-    n_pre_canon = len(combined)
-    combined = canon_filter(combined, args.canon_keep_frac)  # low-sha256 -> win the canonical seal-race
+    basen_sel = list(rng.choice(basen, size=n_basen, replace=False)) if n_basen else []
+    combined_set = (set(numeric) | set(int(i) for i in sym_sel)
+                    | set(int(i) for i in int_sel) | set(int(i) for i in basen_sel))
+
+    # ---- seed proven-winner idxs (e.g. a top miner's accepted prompts) ----
+    n_seed = 0
+    if args.seed_file and os.path.exists(args.seed_file):
+        seed = [int(i) for i in json.load(open(args.seed_file)) if 0 <= int(i) < N]
+        n_seed = len(set(seed) - combined_set)
+        combined_set |= set(seed)
+    combined = sorted(combined_set)
 
     os.makedirs(DATA, exist_ok=True)
-    json.dump(numeric, open(f"{DATA}/inzone_pool_v2_numeric.json", "w"))
-    json.dump(symbolic, open(f"{DATA}/inzone_pool_v2_symbolic.json", "w"))
-    json.dump(combined, open(f"{DATA}/inzone_pool_v2.json", "w"))
+    tag = f"_{args.out_tag}" if args.out_tag else ""   # --out-tag fast -> inzone_pool_v2_fast.json (coexists with the default)
+    json.dump(numeric, open(f"{DATA}/inzone_pool_v2_numeric{tag}.json", "w"))
+    json.dump(symbolic, open(f"{DATA}/inzone_pool_v2_symbolic{tag}.json", "w"))
+    json.dump(basen, open(f"{DATA}/inzone_pool_v2_basen{tag}.json", "w"))
+    json.dump(combined, open(f"{DATA}/inzone_pool_v2{tag}.json", "w"))
 
     ans_list = ans.combine_chunks().to_pylist()
 
@@ -191,14 +203,14 @@ def main():
     print(f"dataset rows (shards loaded) = {N}")
     print(f"\nSUB-POOLS:")
     print(f"  numeric (decimal-ambiguous, gsm8k/aug_gsm8k) : {len(numeric):>7}  {comp(numeric[:20000])}")
-    print(f"  symbolic (non-int, {'aug_math+math' if args.include_math_source else 'augmented_math'}) : {len(symbolic):>7}  {comp(symbolic[:20000])}")
+    print(f"  symbolic (non-int, augmented_math+math)      : {len(symbolic):>7}  {comp(symbolic[:20000])}")
+    print(f"  base-N int (format-ambig, aug_math+math)     : {len(basen):>7}  {comp(basen[:20000])}")
     print(f"  integer slice available (gsm8k/aug_gsm8k)    : {len(integers):>7}")
     print(f"\nACTIVE COMBINED POOL  inzone_pool_v2.json : {len(combined)} idxs"
-          f"  (sym_ratio={args.sym_ratio} int_ratio={args.int_ratio} "
-          f"sym_src={'aug_math+math' if args.include_math_source else 'aug_math'} max_prompt_len={args.max_prompt_len})")
-    if args.canon_keep_frac < 1.0:
-        print(f"  canon-filter: kept lowest-sha256 {args.canon_keep_frac:.0%}"
-              f" -> {len(combined)}/{n_pre_canon} idxs (fewer batch_filled at seal; more low-hash collision)")
+          f"  (sym_ratio={args.sym_ratio} int_ratio={args.int_ratio} basen_ratio={args.basen_ratio} "
+          f"full_symbolic={args.full_symbolic} max_prompt_len={args.max_prompt_len})")
+    if n_seed:
+        print(f"  seeded {n_seed} extra proven-winner idxs from {args.seed_file}")
     print(f"  composition: {comp(combined)}")
     print(f"  sample answers: {[ans_list[i] for i in combined[:14]]}")
 
