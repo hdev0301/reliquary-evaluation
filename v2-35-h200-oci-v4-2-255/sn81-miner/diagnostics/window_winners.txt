@@ -1,0 +1,7 @@
+CROSS-WINDOW ANALYSIS (last 72 windows 11542..11614, from /api/miners .windows)
+Window winners (top_hotkey): D=19, B=16, C=10, A=7  -> 4 targets won 52/72 = 72%
+Other winners: 5F7YBWD1(9), 5GxSiKC5(4), 5GxNhDLW(3), 5Hp6EPJd(2), 2 singletons
+task_source: 100% openmathinstruct (OpenCode not scored in these windows)
+zone sigma_min: constant 0.43 across all 72 windows
+in-zone/total groups network-wide: 771/1038 = 74.3%
+avg total_accepted/window=10.71 ; avg miners submitting/window=6.0 (small field)

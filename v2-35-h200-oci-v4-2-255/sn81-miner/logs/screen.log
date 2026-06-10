@@ -1,0 +1,147 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+INFO 06-08 12:44:27 [utils.py:233] non-default args: {'tokenizer': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/', 'dtype': 'bfloat16', 'max_model_len': 2304, 'gpu_memory_utilization': 0.85, 'disable_log_stats': True, 'enforce_eager': True, 'limit_mm_per_prompt': {'image': 0, 'video': 0}, 'model': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/'}
+INFO 06-08 12:44:27 [model.py:555] Resolved architecture: Qwen3_5ForConditionalGeneration
+INFO 06-08 12:44:27 [model.py:1680] Using max model len 2304
+INFO 06-08 12:44:27 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+INFO 06-08 12:44:27 [vllm.py:840] Asynchronous scheduling is enabled.
+WARNING 06-08 12:44:27 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-08 12:44:27 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-08 12:44:27 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+INFO 06-08 12:44:28 [vllm.py:1089] Cudagraph is disabled under eager mode
+INFO 06-08 12:44:28 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+INFO 06-08 12:44:29 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 06-08 12:44:29 [nixl_utils.py:34] NIXL is not available
+WARNING 06-08 12:44:29 [nixl_utils.py:44] NIXL agent config is not available
+[transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+INFO 06-08 12:44:30 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+WARNING 06-08 12:44:30 [system_utils.py:157] We must use the `spawn` multiprocessing start method. Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. See https://docs.vllm.ai/en/latest/usage/troubleshooting.html#python-multiprocessing for more information. Reasons: CUDA is initialized
+(EngineCore pid=107625) INFO 06-08 12:44:34 [core.py:109] Initializing a V1 LLM engine (v0.20.2) with config: model='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/', speculative_config=None, tokenizer='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=2304, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=True, moe_backend='auto')
+(EngineCore pid=107625) WARNING 06-08 12:44:35 [nixl_utils.py:34] NIXL is not available
+(EngineCore pid=107625) WARNING 06-08 12:44:35 [nixl_utils.py:44] NIXL agent config is not available
+(EngineCore pid=107625) [transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+(EngineCore pid=107625) INFO 06-08 12:44:36 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=107625) INFO 06-08 12:44:36 [parallel_state.py:1402] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.20.0.2:51577 backend=nccl
+(EngineCore pid=107625) INFO 06-08 12:44:36 [parallel_state.py:1715] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=107625) INFO 06-08 12:44:37 [gpu_model_runner.py:4777] Starting to load model /root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/e7324d79fdf2bfcca7949f033d5464cb2dbbfa1a/...
+(EngineCore pid=107625) INFO 06-08 12:44:37 [cuda.py:423] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(EngineCore pid=107625) INFO 06-08 12:44:37 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(EngineCore pid=107625) INFO 06-08 12:44:37 [gdn_linear_attn.py:146] Using FlashInfer GDN prefill kernel
+(EngineCore pid=107625) INFO 06-08 12:44:37 [gdn_linear_attn.py:147] FlashInfer GDN prefill kernel is JIT-compiled; first run may take a while to compile. Set `--gdn-prefill-backend triton` to avoid JIT compile time.
+(EngineCore pid=107625) INFO 06-08 12:44:37 [cuda.py:368] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=107625) INFO 06-08 12:44:37 [flash_attn.py:646] Using FlashAttention version 3
+(EngineCore pid=107625) INFO 06-08 12:44:37 [weight_utils.py:904] Filesystem type for checkpoints: XFS. Checkpoint size: 8.46 GiB. Available RAM: 225.60 GiB.
+(EngineCore pid=107625) INFO 06-08 12:44:37 [weight_utils.py:927] Auto-prefetch is disabled because the filesystem (XFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=107625) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=107625) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.08s/it]
+(EngineCore pid=107625) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.08s/it]
+(EngineCore pid=107625) 
+(EngineCore pid=107625) INFO 06-08 12:44:38 [default_loader.py:384] Loading weights took 1.18 seconds
+(EngineCore pid=107625) INFO 06-08 12:44:39 [gpu_model_runner.py:4879] Model loading took 7.99 GiB memory and 1.635835 seconds
+(EngineCore pid=107625) INFO 06-08 12:44:39 [interface.py:606] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=107625) INFO 06-08 12:44:39 [interface.py:630] Padding mamba page size by 0.76% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=107625) INFO 06-08 12:44:40 [gpu_worker.py:440] Available KV cache memory: 107.06 GiB
+(EngineCore pid=107625) INFO 06-08 12:44:40 [kv_cache_utils.py:1708] GPU KV cache size: 1,913,472 tokens
+(EngineCore pid=107625) INFO 06-08 12:44:40 [kv_cache_utils.py:1709] Maximum concurrency for 2,304 tokens per request: 830.50x
+(EngineCore pid=107625) 2026-06-08 12:44:40,393 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=107625) 2026-06-08 12:44:40,453 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=107625) INFO 06-08 12:44:40 [core.py:306] init engine (profile, create kv cache, warmup model) took 1.42 s
+(EngineCore pid=107625) INFO 06-08 12:44:40 [vllm.py:840] Asynchronous scheduling is enabled.
+(EngineCore pid=107625) WARNING 06-08 12:44:40 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=107625) WARNING 06-08 12:44:40 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=107625) INFO 06-08 12:44:40 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+(EngineCore pid=107625) INFO 06-08 12:44:40 [vllm.py:1089] Cudagraph is disabled under eager mode
+(EngineCore pid=107625) INFO 06-08 12:44:40 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+screening 64 prompts from /root/sn81-miner/data/inzone_pool_v2.json @ e7324d79fdf2 max_tok=1280
+Rendering prompts:   0%|          | 0/64 [00:00<?, ?it/s]Rendering prompts: 100%|██████████| 64/64 [00:00<00:00, 3008.39it/s]
+Processed prompts:   0%|          | 0/512 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts:   2%|▏         | 8/512 [00:08<08:54,  1.06s/it, est. speed input: 50.94 toks/s, output: 179.24 toks/s]Processed prompts:   3%|▎         | 16/512 [00:09<04:15,  1.94it/s, est. speed input: 85.53 toks/s, output: 341.28 toks/s]Processed prompts:   5%|▍         | 24/512 [00:10<02:37,  3.10it/s, est. speed input: 132.77 toks/s, output: 492.95 toks/s]Processed prompts:   6%|▋         | 32/512 [00:11<01:52,  4.26it/s, est. speed input: 147.73 toks/s, output: 644.25 toks/s]Processed prompts:   8%|▊         | 40/512 [00:11<01:17,  6.12it/s, est. speed input: 191.66 toks/s, output: 817.80 toks/s]Processed prompts:   9%|▉         | 48/512 [00:11<00:56,  8.15it/s, est. speed input: 220.03 toks/s, output: 980.67 toks/s]Processed prompts:  11%|█         | 56/512 [00:12<00:49,  9.27it/s, est. speed input: 254.97 toks/s, output: 1115.97 toks/s]Processed prompts:  16%|█▌        | 80/512 [00:12<00:23, 18.14it/s, est. speed input: 422.48 toks/s, output: 1604.34 toks/s]Processed prompts:  17%|█▋        | 88/512 [00:13<00:23, 17.93it/s, est. speed input: 455.96 toks/s, output: 1715.66 toks/s]Processed prompts:  19%|█▉        | 96/512 [00:13<00:24, 17.04it/s, est. speed input: 474.50 toks/s, output: 1824.93 toks/s]Processed prompts:  20%|██        | 104/512 [00:14<00:27, 15.08it/s, est. speed input: 492.05 toks/s, output: 1907.39 toks/s]Processed prompts:  25%|██▌       | 128/512 [00:15<00:21, 18.09it/s, est. speed input: 572.34 toks/s, output: 2260.30 toks/s]Processed prompts:  27%|██▋       | 136/512 [00:15<00:18, 20.16it/s, est. speed input: 612.21 toks/s, output: 2409.26 toks/s]Processed prompts:  28%|██▊       | 144/512 [00:16<00:17, 21.18it/s, est. speed input: 636.19 toks/s, output: 2552.70 toks/s]Processed prompts:  30%|██▉       | 152/512 [00:17<00:22, 15.78it/s, est. speed input: 632.00 toks/s, output: 2568.40 toks/s]Processed prompts:  33%|███▎      | 168/512 [00:17<00:14, 23.47it/s, est. speed input: 672.16 toks/s, output: 2876.58 toks/s]Processed prompts:  34%|███▍      | 176/512 [00:17<00:12, 27.90it/s, est. speed input: 694.13 toks/s, output: 3044.07 toks/s]Processed prompts:  36%|███▌      | 184/512 [00:18<00:19, 16.88it/s, est. speed input: 680.36 toks/s, output: 3044.96 toks/s]Processed prompts:  38%|███▊      | 192/512 [00:18<00:15, 20.75it/s, est. speed input: 712.26 toks/s, output: 3214.58 toks/s]Processed prompts:  39%|███▉      | 200/512 [00:19<00:19, 16.41it/s, est. speed input: 706.43 toks/s, output: 3291.97 toks/s]Processed prompts:  41%|████      | 208/512 [00:19<00:17, 17.16it/s, est. speed input: 711.22 toks/s, output: 3378.42 toks/s]Processed prompts:  42%|████▏     | 216/512 [00:23<00:52,  5.69it/s, est. speed input: 622.29 toks/s, output: 2987.47 toks/s]Processed prompts:  44%|████▍     | 224/512 [00:25<00:57,  5.05it/s, est. speed input: 596.48 toks/s, output: 2950.27 toks/s]Processed prompts:  45%|████▌     | 232/512 [00:28<01:08,  4.07it/s, est. speed input: 568.16 toks/s, output: 2805.76 toks/s]Processed prompts:  47%|████▋     | 240/512 [00:32<01:25,  3.17it/s, est. speed input: 516.54 toks/s, output: 2634.23 toks/s]Processed prompts:  48%|████▊     | 248/512 [00:33<01:10,  3.74it/s, est. speed input: 522.48 toks/s, output: 2711.65 toks/s]Processed prompts:  50%|█████     | 256/512 [00:35<01:08,  3.72it/s, est. speed input: 521.65 toks/s, output: 2740.94 toks/s]Processed prompts:  52%|█████▏    | 264/512 [00:37<01:04,  3.82it/s, est. speed input: 507.27 toks/s, output: 2749.40 toks/s]Processed prompts:  53%|█████▎    | 272/512 [00:39<01:00,  3.95it/s, est. speed input: 495.58 toks/s, output: 2835.94 toks/s]Processed prompts:  55%|█████▍    | 280/512 [00:43<01:19,  2.90it/s, est. speed input: 463.56 toks/s, output: 2733.07 toks/s]Processed prompts: 100%|██████████| 512/512 [00:43<00:00,  2.90it/s, est. speed input: 910.25 toks/s, output: 8592.80 toks/s]Processed prompts: 100%|██████████| 512/512 [00:43<00:00, 11.64it/s, est. speed input: 910.25 toks/s, output: 8592.80 toks/s]
+(EngineCore pid=107625) INFO 06-08 12:45:24 [core.py:1238] Shutdown initiated (timeout=0)
+(EngineCore pid=107625) INFO 06-08 12:45:24 [core.py:1261] Shutdown complete
+[rank0]:[W608 12:45:25.188374793 ProcessGroupNCCL.cpp:1575] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+idx | k/8 term/8 shape | gt
+347647 | 8/8 8/8 int      | 76
+161335 | 5/8 5/8 decimal  | 50.25
+424703 | 8/8 8/8 int      | 5
+699057 | 8/8 8/8 decimal  | 77.5
+51890 | 8/8 8/8 int      | 520
+77815 | 0/8 0/8 fraction | \frac{1}{2}
+576180 | 8/8 8/8 decimal  | 11.11
+100946 | 8/8 8/8 int      | 21
+393219 | 1/8 1/8 decimal  | 34.29
+625925 | 7/8 7/8 int      | 12
+62281 | 0/8 0/8 fraction | \frac{4}{\pi}
+546087 | 6/8 6/8 int      | 35
+230520 | 8/8 8/8 int      | 24
+40511 | 1/8 1/8 fraction | \frac{4}{663}
+92123 | 5/8 5/8 decimal  | 8.75
+467121 | 0/8 0/8 fraction | \frac{5}{9}
+450216 | 4/8 4/8 decimal  | 2.67
+74956 | 8/8 8/8 int      | 2
+258551 | 0/8 0/8 decimal  | 2.351
+97237 | 8/8 8/8 decimal  | 136.08
+592038 | 8/8 8/8 int      | 110
+457469 | 0/8 0/8 radical  | 40\pi\sqrt{3}
+63403 | 8/8 8/8 int      | 270
+607693 | 8/8 8/8 decimal  | 1381.41
+132291 | 8/8 8/8 int      | 130
+239777 | 8/8 8/8 int      | 12
+676769 | 0/8 0/8 fraction | \frac{\sqrt{2}}{8}
+673367 | 8/8 8/8 fraction | \frac{5\sqrt{2}}{2}
+626114 | 0/8 0/8 other    | 43024_5
+66272 | 8/8 8/8 var/text | x^2 + 4x - 21
+620141 | 0/8 8/8 int      | 358
+628621 | 8/8 8/8 decimal  | 7.2
+426673 | 8/8 8/8 fraction | \frac{7}{25}
+53421 | 2/8 2/8 decimal  | 5.5
+237447 | 8/8 8/8 decimal  | 20.5
+50122 | 5/8 5/8 decimal  | 55.94
+598233 | 0/8 0/8 fraction | \frac{1}{3}
+142416 | 0/8 0/8 int      | 9
+310319 | 6/8 6/8 decimal  | 5.45
+451259 | 8/8 8/8 fraction | \frac{\sqrt{65}}{9}
+154429 | 8/8 8/8 fraction | -\frac{4}{7}
+581167 | 0/8 0/8 int      | 52
+125930 | 8/8 8/8 fraction | \frac{8}{5}
+613471 | 0/8 0/8 fraction | \frac{5i\sqrt{3}}{9}
+330950 | 8/8 8/8 decimal  | 56.25
+602061 | 8/8 8/8 int      | 112
+732711 | 8/8 7/8 int      | 40
+193770 | 8/8 8/8 decimal  | 16.67
+110352 | 8/8 8/8 decimal  | 16.5
+624722 | 8/8 8/8 int      | 12
+613790 | 8/8 8/8 var/text | z = x^2 + y^2
+685853 | 3/8 3/8 int      | 12600
+201125 | 0/8 2/8 int      | 3
+400359 | 8/8 8/8 int      | 200
+104573 | 8/8 8/8 int      | 33
+588807 | 8/8 8/8 decimal  | 12.5
+764336 | 3/8 3/8 decimal  | 112.5
+67244 | 8/8 8/8 var/text | \begin{pmatrix} 6 \\ 3 \\ -3 \
+606545 | 6/8 6/8 decimal  | 69.14
+63861 | 3/8 4/8 int      | 230
+664368 | 0/8 0/8 int      | 24
+221424 | 8/8 8/8 int      | 800
+534261 | 7/8 7/8 fraction | \frac{\sqrt{6} - \sqrt{2}}{4}
+730739 | 5/8 5/8 int      | 18
+
+=== k-distribution (correct of 8) ===
+  k=0:  14 ##############  <- 0/8 waste
+  k=1:   2 ##
+  k=2:   1 #  <- in-zone
+  k=3:   3 ###  <- in-zone
+  k=4:   1 #  <- in-zone
+  k=5:   4 ####  <- in-zone
+  k=6:   3 ###  <- in-zone
+  k=7:   2 ##
+  k=8:  34 ##################################  <- 8/8 waste
+
+IN-ZONE (k=2..6): 12/64 = 19%   |   8/8 waste: 53%   0/8 waste: 22%
+
+=== in-zone rate by answer shape ===
+  int      :   4/ 26 in-zone = 15%
+  decimal  :   8/ 20 in-zone = 40%
+  fraction :   0/ 13 in-zone = 0%
+  var/text :   0/  3 in-zone = 0%
+  radical  :   0/  1 in-zone = 0%
+  other    :   0/  1 in-zone = 0%
+
+VERDICT: MARGINAL (19% in-zone) — usable but consider tuning shape mix toward the best-yielding shapes above.
