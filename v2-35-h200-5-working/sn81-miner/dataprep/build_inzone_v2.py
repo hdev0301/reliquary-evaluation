@@ -35,7 +35,7 @@ OUTPUTS (under data/):
 Run:  cd /root/reliquary && .venv/bin/python /root/sn81-miner/dataprep/build_inzone_v2.py
 Knobs (argv or env): --sym-ratio 0.25  --int-ratio 0.0  --max-prompt-len 400
 """
-import argparse, json, os, re, sys
+import argparse, hashlib, json, os, re, sys
 from collections import Counter
 
 import numpy as np
@@ -46,6 +46,31 @@ from reliquary.environment.openmathinstruct import _normalize_answer
 
 DATA = "/root/sn81-miner/data"
 DIAG = "/root/sn81-miner/diagnostics"
+
+
+def _canonical_key(prompt_idx: int) -> bytes:
+    """Byte-for-byte match of the validator's _prompt_canonical_key
+    (reliquary/validator/batch_selection.py) and the miner's _canonical_key
+    (reliquary/miner/pregen.py): sha256 of prompt_idx as 8-byte big-endian.
+    At seal the validator fills the boundary round with the B_BATCH DISTINCT
+    prompts of LOWEST digest, so low-hash prompts win the canonical top-8."""
+    return hashlib.sha256(int(prompt_idx).to_bytes(8, "big", signed=False)).digest()
+
+
+def canon_filter(idxs, keep_frac):
+    """Keep only the lowest-sha256(prompt_idx) `keep_frac` of `idxs` — the prompts
+    most likely to land in the validator's canonical top-B_BATCH at seal, which is
+    what reduces `batch_filled` rejects. keep_frac >= 1.0 is a no-op.
+
+    Caveat: aggressive values shrink the pool toward the few globally-lowest-hash
+    prompts that EVERY canon-aware miner converges on -> higher per-prompt
+    collision (the boundary round splits a slot's reward across same-prompt
+    submitters). 0.2-0.4 is a reasonable advantage-vs-collision trade."""
+    if keep_frac >= 1.0:
+        return idxs
+    ordered = sorted(idxs, key=_canonical_key)
+    n_keep = max(1, int(round(len(ordered) * keep_frac)))
+    return sorted(int(i) for i in ordered[:n_keep])
 
 
 def regex_mask(col, pattern):
@@ -63,8 +88,19 @@ def main():
                     help="symbolic idxs as a fraction of the combined pool (C-style diversification)")
     ap.add_argument("--int-ratio", type=float, default=float(os.environ.get("V2_INT_RATIO", "0.30")),
                     help="plain-integer idxs as a fraction of the combined pool (bimodal-prone; hedge)")
-    ap.add_argument("--max-prompt-len", type=int, default=400)
+    ap.add_argument("--max-prompt-len", type=int, default=600,
+                    help="max problem CHARS (prompt filter). 5HEAK6 mines prompts up to ~1078 chars; 400 was "
+                         "too restrictive (p95=417), 600 captures nearly all of the winners' prompt distribution.")
+    ap.add_argument("--include-math-source", action=argparse.BooleanOptionalAction, default=True,
+                    help="include the base `math` competition split (not just augmented_math) in the SYMBOLIC pool. "
+                         "5HEAK6's radical/complex/interval symbolic wins live partly in `math`, which the "
+                         "augmented_math-only mask missed. Use --no-include-math-source for the old behavior.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--canon-keep-frac", type=float,
+                    default=float(os.environ.get("V2_CANON_KEEP_FRAC", "1.0")),
+                    help="Keep only the lowest-sha256(prompt_idx) fraction of the ACTIVE pool. These win the "
+                         "validator's boundary-round canonical top-8 (batch_selection.py) more often, cutting "
+                         "batch_filled losses. 1.0=off; try 0.2-0.4. Lower => more low-hash collision.")
     args = ap.parse_args()
 
     env = load_environment("openmathinstruct")
@@ -83,7 +119,11 @@ def main():
     is_decimal_ambig = pc.and_(is_dec_full, pc.invert(is_dec_zero))
 
     src_numeric = pc.is_in(src, value_set=pa.array(["gsm8k", "augmented_gsm8k"]))
-    src_math = pc.equal(src, "augmented_math")
+    # SYMBOLIC source: augmented_math always; add the base `math` competition split when
+    # --include-math-source (default). 5HEAK6's radical/complex/interval wins live partly in `math`,
+    # which the old augmented_math-only mask excluded entirely.
+    _sym_srcs = ["augmented_math", "math"] if args.include_math_source else ["augmented_math"]
+    src_math = pc.is_in(src, value_set=pa.array(_sym_srcs))
 
     # B/D engine: decimal-ambiguous answers on the numeric (gsm8k-style) sources
     numeric_mask = pc.and_(pc.and_(is_decimal_ambig, src_numeric), pc.and_(len_ok, nonempty))
@@ -116,6 +156,8 @@ def main():
     sym_sel = list(rng.choice(symbolic, size=n_sym, replace=False)) if n_sym else []
     int_sel = list(rng.choice(integers, size=n_int, replace=False)) if n_int else []
     combined = sorted(set(numeric) | set(int(i) for i in sym_sel) | set(int(i) for i in int_sel))
+    n_pre_canon = len(combined)
+    combined = canon_filter(combined, args.canon_keep_frac)  # low-sha256 -> win the canonical seal-race
 
     os.makedirs(DATA, exist_ok=True)
     json.dump(numeric, open(f"{DATA}/inzone_pool_v2_numeric.json", "w"))
@@ -149,10 +191,14 @@ def main():
     print(f"dataset rows (shards loaded) = {N}")
     print(f"\nSUB-POOLS:")
     print(f"  numeric (decimal-ambiguous, gsm8k/aug_gsm8k) : {len(numeric):>7}  {comp(numeric[:20000])}")
-    print(f"  symbolic (non-int, augmented_math)           : {len(symbolic):>7}  {comp(symbolic[:20000])}")
+    print(f"  symbolic (non-int, {'aug_math+math' if args.include_math_source else 'augmented_math'}) : {len(symbolic):>7}  {comp(symbolic[:20000])}")
     print(f"  integer slice available (gsm8k/aug_gsm8k)    : {len(integers):>7}")
     print(f"\nACTIVE COMBINED POOL  inzone_pool_v2.json : {len(combined)} idxs"
-          f"  (sym_ratio={args.sym_ratio} int_ratio={args.int_ratio})")
+          f"  (sym_ratio={args.sym_ratio} int_ratio={args.int_ratio} "
+          f"sym_src={'aug_math+math' if args.include_math_source else 'aug_math'} max_prompt_len={args.max_prompt_len})")
+    if args.canon_keep_frac < 1.0:
+        print(f"  canon-filter: kept lowest-sha256 {args.canon_keep_frac:.0%}"
+              f" -> {len(combined)}/{n_pre_canon} idxs (fewer batch_filled at seal; more low-hash collision)")
     print(f"  composition: {comp(combined)}")
     print(f"  sample answers: {[ans_list[i] for i in combined[:14]]}")
 
