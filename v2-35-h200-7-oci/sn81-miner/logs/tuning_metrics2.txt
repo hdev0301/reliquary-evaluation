@@ -1,0 +1,40 @@
+booted PID=14695 ~5s | TWO-STAGE funnel enabled: screen(n=32, cap=1024, min_term=4, p=[0.03,0.97]) -> deep(n=64)
+t=60s gpu_avg=55% max=100% mem=125061 pw=360.44W | acc=0 rej=0 bf=0 fires=0
+t=120s gpu_avg=56% max=100% mem=127055 pw=502.17W | acc=0 rej=0 bf=0 fires=0
+t=180s gpu_avg=55% max=100% mem=127055 pw=323.68W | acc=0 rej=0 bf=0 fires=0
+t=240s gpu_avg=56% max=100% mem=127295 pw=480.32W | acc=2 rej=0 bf=0 fires=2
+t=300s gpu_avg=55% max=100% mem=127295 pw=360.67W | acc=2 rej=0 bf=0 fires=2
+t=360s gpu_avg=55% max=100% mem=127917 pw=228.14W | acc=2 rej=0 bf=0 fires=2
+t=420s gpu_avg=56% max=100% mem=127919 pw=331.68W | acc=2 rej=4 bf=10 fires=6
+t=480s gpu_avg=54% max=100% mem=127919 pw=364.97W | acc=2 rej=4 bf=10 fires=6
+=== NEWCONFIG(pool48/gen24/tok1024) FINAL gpu avg=54% max=100% n=96 ===
+verdicts:
+      4 accepted=False
+      2 accepted=True
+reasons:
+     10 reason=batch_filled
+      2 reason=submitted
+sigma:
+      1 sigma=0.433
+      3 sigma=0.484
+      2 sigma=0.500
+t_since_window_seen:
+min=0.00 med=144.18 max=156.64 n=6
+screen promising:
+      2 screen: 3/24 promising
+      1 screen: 4/24 promising
+      1 screen: 7/24 promising
+mean_term:
+min=0.75 med=0.76 max=0.89
+kept:
+      1 kept=0
+      1 kept=1
+      1 kept=2
+      1 kept=4
+last8 verdicts:
+2026-06-05 12:17:50 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=613005 sigma=0.500 round=29286168 accepted=True reason=submitted
+Processed prompts:   4%|▍         | 32/768 [00:17<06:40,  1.84it/s, est. speed input: 168.97 toks/s, output: 884.74 toks/s]2026-06-05 12:17:54 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=415877 sigma=0.484 round=29286170 accepted=True reason=submitted
+Processed prompts:   0%|          | 0/768 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]2026-06-05 12:20:14 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=71164 sigma=0.484 round=29286216 accepted=False reason=batch_filled
+2026-06-05 12:20:18 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=684883 sigma=0.484 round=29286218 accepted=False reason=batch_filled
+2026-06-05 12:20:22 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=230740 sigma=0.433 round=29286219 accepted=False reason=batch_filled
+2026-06-05 12:20:26 | MainThread | reliquary.miner.engine | INFO | submitted window=12246 prompt=81150 sigma=0.500 round=29286220 accepted=False reason=batch_filled

@@ -1,0 +1,32 @@
+booted PID=18154 ~20s | PREDICT_BLIND env: RELIQUARY_PREDICT_BLIND=1
+t=90s | REAL ACCEPTED=0 REJECTED=0 | predict-fired=0 | acks=0
+t=180s | REAL ACCEPTED=0 REJECTED=0 | predict-fired=0 | acks=0
+t=270s | REAL ACCEPTED=0 REJECTED=0 | predict-fired=0 | acks=5
+t=360s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+t=450s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+t=540s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+t=630s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+t=720s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+t=810s | REAL ACCEPTED=0 REJECTED=5 | predict-fired=0 | acks=5
+=== ITER2 FINAL (PREDICT_BLIND=1, delay=0, k=2, 114k) ===
+verdict ACCEPTED: 0
+verdict REJECTED: 5
+PREDICT-FIRED events: 0
+reject reasons:
+      5 reason=batch_filled
+over= dist (real verdicts):
+      1 over=0
+      1 over=2
+      1 over=4
+      1 over=5
+      1 over=15
+stage= dist:
+      5 stage=seal
+-- ACCEPTED lines (if any!) --
+-- PREDICT-FIRED samples --
+-- last 6 real verdicts --
+Processed prompts:   0%|          | 0/64 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]2026-06-05 14:05:31 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12256 mr=c224f080fa9c reason=batch_filled | sub=29288277 arr=29288277 trig=29288277 over=0 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=131901.25942230225ms
+2026-06-05 14:05:46 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12256 mr=fe28d56b173f reason=batch_filled | sub=29288279 arr=29288279 trig=29288277 over=2 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=141656.09788894653ms
+2026-06-05 14:05:46 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12256 mr=b65a363eba52 reason=batch_filled | sub=29288281 arr=29288281 trig=29288277 over=4 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=135236.8516921997ms
+2026-06-05 14:05:46 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12256 mr=ecead17bfb63 reason=batch_filled | sub=29288282 arr=29288282 trig=29288277 over=5 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=130874.59087371826ms
+2026-06-05 14:05:46 | MainThread | reliquary.miner.engine | WARNING | verdict REJECTED win=12256 mr=0f31164d0a34 reason=batch_filled | sub=29288292 arr=29288292 trig=29288277 over=15 tol=None stage=seal rank=None qwait=Nonems verify=Nonems total=103199.13387298584ms

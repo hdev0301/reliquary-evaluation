@@ -1,0 +1,7 @@
+grader already running (socket /tmp/reliquary-grader.sock)
+[opencode] real-reward mode: subset=/root/sn81-miner/opencode/data/oci_local_subset + local grader
+[opencode] scatter-screened pool: /root/sn81-miner/opencode/data/inzone_pool_opencode.json (846 idxs)
+=== OPENCODE launcher | pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | predict_blind=1 (min_windows=2 lead=1000ms) ===
+=== MODE=opencode | env=opencodeinstruct | pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | max_new=1280 | k=4 | curate=0 ===
+pool ok: 846 idxs
+launched PID=50113 | MODE=opencode env=opencodeinstruct pool=/root/sn81-miner/opencode/data/inzone_pool_opencode.json | log=/root/sn81-miner/logs/miner.log

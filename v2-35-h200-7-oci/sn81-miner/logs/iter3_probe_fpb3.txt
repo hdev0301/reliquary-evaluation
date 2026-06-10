@@ -1,0 +1,28 @@
+booted PID=18948 ~15s
+t=120s | REAL ACC=0 REJ=0 | predict-learn=0 fired=0 | probe-detects=0
+t=240s | REAL ACC=0 REJ=0 | predict-learn=0 fired=0 | probe-detects=0
+t=360s | REAL ACC=0 REJ=0 | predict-learn=0 fired=0 | probe-detects=0
+t=480s | REAL ACC=0 REJ=0 | predict-learn=0 fired=0 | probe-detects=1
+t=600s | REAL ACC=0 REJ=0 | predict-learn=0 fired=0 | probe-detects=1
+t=720s | REAL ACC=0 REJ=3 | predict-learn=0 fired=0 | probe-detects=1
+t=840s | REAL ACC=0 REJ=3 | predict-learn=0 fired=0 | probe-detects=1
+t=960s | REAL ACC=0 REJ=3 | predict-learn=0 fired=0 | probe-detects=1
+t=1080s | REAL ACC=0 REJ=3 | predict-learn=0 fired=0 | probe-detects=2
+t=1200s | REAL ACC=0 REJ=3 | predict-learn=0 fired=0 | probe-detects=2
+t=1320s | REAL ACC=0 REJ=4 | predict-learn=0 fired=0 | probe-detects=2
+t=1440s | REAL ACC=0 REJ=4 | predict-learn=0 fired=0 | probe-detects=2
+=== ITER3 FINAL (FIRE_PER_BURST=3, PREDICT_BLIND=1, DETECT_PROBE=1) ===
+verdict ACCEPTED: 0  REJECTED: 4
+PREDICT-LEARN: 0  PREDICT-FIRED: 0
+*** PROBE-DETECT valid_subs at window-detect (HIGH=sealed-before-we-saw-it=structural; LOW=fresh shot) ***
+  n=2 min=0 median=0 max=0
+  valid_subs histogram:
+      2 valid_subs=0
+reject reasons:
+      4 reason=batch_filled
+over= dist:
+      4 over=0
+-- ACCEPTED lines (if ANY) --
+-- sample PROBE-DETECT --
+2026-06-05 14:24:13 | MainThread | reliquary.miner.engine | INFO | PROBE-DETECT win=12258 valid_subs=0 state=OPEN rand_ready=True
+2026-06-05 14:34:43 | MainThread | reliquary.miner.engine | INFO | PROBE-DETECT win=12259 valid_subs=0 state=OPEN rand_ready=True

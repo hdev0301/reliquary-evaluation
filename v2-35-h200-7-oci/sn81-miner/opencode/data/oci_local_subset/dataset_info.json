@@ -1,0 +1,40 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "opencodeinstruct-prompts",
+  "dataset_size": 34057500,
+  "description": "",
+  "download_size": 14117921,
+  "features": {
+    "input": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "id": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "structured_cases": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 48175421,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 34057500,
+      "num_examples": 50000,
+      "dataset_name": "opencodeinstruct-prompts"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

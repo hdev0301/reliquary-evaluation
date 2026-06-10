@@ -1,0 +1,25 @@
+loading prompt mirror R0mAI/opencodeinstruct-prompts@f50bef12 ...
+mirror rows=50000; screening 6000 candidates; M=16; band=[0.06,0.94]
+reconstructing cases for 3566 ids (streaming nvidia/OpenCodeInstruct, max_scan=2000000)...
+  resolved 200/3566 (scanned 14622)
+  resolved 400/3566 (scanned 31342)
+  resolved 600/3566 (scanned 56127)
+  resolved 800/3566 (scanned 75606)
+  resolved 1000/3566 (scanned 90742)
+  resolved 1200/3566 (scanned 106960)
+  resolved 1400/3566 (scanned 121968)
+  resolved 1600/3566 (scanned 143282)
+  resolved 1800/3566 (scanned 161958)
+  resolved 2000/3566 (scanned 179702)
+  resolved 2200/3566 (scanned 194996)
+  resolved 2400/3566 (scanned 210990)
+  resolved 2600/3566 (scanned 226431)
+  resolved 2800/3566 (scanned 243413)
+  resolved 3000/3566 (scanned 260358)
+  resolved 3200/3566 (scanned 276835)
+  resolved 3400/3566 (scanned 291821)
+usable (have structured cases): 5999/6000
+
+cases-only: cached 5999 usable case-sets this run (cache now ~24193 entries) -> /root/sn81-miner/opencode/data/oci_cases_cache.json
+skipped GPU generation/grading. Next: rebuild the local subset, then restart the miner:
+  .venv/bin/python /root/sn81-miner/opencode/build_local_subset.py
