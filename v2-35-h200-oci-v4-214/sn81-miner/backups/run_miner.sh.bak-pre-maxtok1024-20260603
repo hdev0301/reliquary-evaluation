@@ -1,0 +1,84 @@
+#!/bin/bash
+# Reliquary miner — CURATION / validator-replica pipeline (reward-vector candidate
+# selection). On a converged BIMODAL checkpoint, natural 8-sample groups score 8/8
+# or 0/8 (never in-zone). Curation (pregen.py build_groups) over-generates, rewards
+# every candidate against the PUBLIC env reward, SELECTS an in-zone 8-subset
+# (k correct + 8-k wrong), places it non-monotonically (passes reward_shape), and
+# pre-validates every gate locally (zero integrity rejects, like the rank-1 miner).
+# All rollouts are genuine current-checkpoint samples; the validator recomputes the
+# reward -> selection, not fabrication.
+cd /root/reliquary || exit 1
+for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+pkill -9 -f "reliquary.cli.main mine" 2>/dev/null || true
+sleep 2
+set -a; source scripts/.env; set +a
+# Qwen3.5 GRAIL proof model is the MULTIMODAL HF model (AutoModelForImageTextToText,
+# includes ~297 vision tensors) -> much heavier than the old text-only proof model.
+# Reduce fragmentation so its forward pass fits in the headroom left by vLLM.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# --- curation knobs (read by reliquary/miner/pregen.py) ---
+export RELIQUARY_CURATE=1
+# SPREAD fix (2026-06-03): cap submits per window so the store retains leftovers for
+# the NEXT window instead of dumping 8 into one already-sealed batch (B_BATCH=8 distinct
+# prompts subnet-wide). Goal: take 1-2 of the 8 slots EVERY window (fresh batch each time)
+# instead of 8-into-one-sealed-window -> ~0 accepts. Supply (~1-1.5 curatable/window) is
+# the ceiling; this converts produced groups to accepts instead of batch_filled.
+export RELIQUARY_MAX_PER_WINDOW=4
+export RELIQUARY_CURATE_TARGET_K=5      # REVERTED from the k=2 prose-era inversion. The upstream
+                                       # fix/omi-boxed-instruction (get_problem now appends "Put your final
+                                       # answer within \boxed{}.") makes Qwen3.5 box 100% -> 78% extractable-
+                                       # correct. So CORRECT is abundant again (easy gsm8k -> ~8/8) and WRONG
+                                       # is the scarce side -> proven k=5 (5 correct + 3 distinct-wrong, sigma=0.484).
+export RELIQUARY_CURATE_MARGIN=2        # validate k+2 / (8-k)+2 candidates, keep first passing
+# bad_termination fix attempt: validator needs p_stop>=0.01 but recomputes it on ITS forward;
+# Qwen3.5 linear-attn forward drift can push a borderline p_stop under 0.01 even though our
+# local screen saw >=0.02. Require a comfortable margin so only confidently-terminating rollouts
+# are submitted. Tune via GROUPDIAG p_stop logging (lower if yield starves, raise if still rejecting).
+export RELIQUARY_SAFE_P_STOP=0.10
+# --- two-stage screen, retuned FOR curation ---
+# Goal: skip ramblers cheaply (the ~88% that don't terminate), but KEEP fluent
+# prompts that have BOTH correct and wrong answers (the curatable ones). The
+# default p-band [0.10,0.90] would reject high-correct prompts curation wants, so
+# widen it to [0.03,0.97]: drop only pure 8/8 / 0/8, keep everything with a mix.
+# Cheaper + broader screen = faster DISCOVERY of the rare fluent+curatable prompts
+# (the real bottleneck: ~99% of pool prompts ramble). Screen many, cheaply.
+export RELIQUARY_SCREEN_OVERSAMPLE=24   # thinking now DISABLED (#78) -> short cheap completions -> screen wider
+export RELIQUARY_SCREEN_MAX_TOKENS=1024 # NO-THINKING regime: model answers directly + \boxed{} in <~400 tokens
+                                        # (probe: 100% terminate <2048). 1024 is ample and ~6x cheaper than the old
+                                        # 6144 thinking cap -> far more prompts screened per cycle (breadth = curatable discovery).
+export RELIQUARY_SCREEN_MIN_TERM=4      # ~100% terminate now; keep a small floor to drop pathological prompts
+export RELIQUARY_SCREEN_P_LOW=0.03      # keep prompts with >=~2 wrong present
+export RELIQUARY_SCREEN_P_HIGH=0.97     # keep prompts with <100% correct (i.e. some wrong)
+# Hot pool: self-built cache of screen-proven fluent+curatable prompts, re-mined
+# to amortize discovery (the "prepare data" step, built on the H200 as it mines).
+export RELIQUARY_HOT_POOL_PATH=/root/sn81-miner/data/hot_pool.json
+export RELIQUARY_HOT_FRAC=0.5           # hot pool is clean (curated-only) + persistent blocklist prevents
+                                       # double-submit, so re-mining is productive; it's a CAP that self-limits
+                                       # via fresh-fill (pregen.py:400-407), so no wasted compute when hot is small
+export RELIQUARY_HOT_CAP=4000
+export RELIQUARY_BURNED_PATH=/root/sn81-miner/data/submitted_idx.json  # persistent anti-hash_duplicate blocklist
+mkdir -p /root/sn81-miner/logs
+rm -f /root/sn81-miner/logs/miner.log
+nohup .venv/bin/python -m reliquary.cli.main mine \
+  --network finney --netuid 81 --wallet-name ronnywebdev --hotkey ronnywebdev_hotkey \
+  --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 \
+  --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 24 \
+  --max-new-tokens 2048 --oversample 64 \
+  --prompt-idx-file /root/sn81-miner/data/inzone_pool_qwen35.json --two-stage \
+  --log-level INFO > /root/sn81-miner/logs/miner.log 2>&1 &
+# gen-batch 24->8 (2026-06-03 LATENCY/SPREAD fix): pregen and the submit loop share ONE
+# process. With augmented_math completions running 1000-2000 tokens, each pregen cycle took
+# ~105s holding the GPU/GIL, so the MainThread submit loop only got CPU at cycle BOUNDARIES
+# -> it dumped all ready groups into ONE window every ~105s, then was frozen through the next
+# ~3 windows (windows open every ~32s). Since the validator seals each window at B_BATCH=8
+# DISTINCT prompts subnet-wide (a FRESH 8-slot race every window), missing 3/4 windows = lost
+# accepts; dumping 8 into one window also just batch_fills past ~4. Fix: shrink the cycle so
+# cycle-boundary ~= window cadence -> MainThread submits ~every window, spreading our
+# (supply-limited ~2.3 groups/min) output across fresh batches. Supply ~unchanged (fewer
+# prompts/cycle x more cycles); breadth loss is OK now that the hot pool (~450 proven
+# curatable idxs, HOT_FRAC=0.5) supplies curatable prompts without wide per-cycle discovery.
+# If still missing windows, next levers: (a) cap max-new-tokens/screen-max lower to drop slow
+# long-derivation prompts (faster cycles + higher supply), (b) wire RELIQUARY_MAX_PER_WINDOW
+# to force store buffering -> pregen's ready>=target pause (pregen.py:402) frees the GIL.
+echo $! > /root/sn81-miner/miner.pid
+echo "launched PID=$(cat /root/sn81-miner/miner.pid) | log=/root/sn81-miner/logs/miner.log"

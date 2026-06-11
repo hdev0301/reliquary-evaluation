@@ -1,0 +1,81 @@
+#!/bin/bash
+# ===========================================================================
+# run_miner_v2.sh  --  analysis-driven variant of run_miner.sh
+# Implements the 4-top-miner study (diagnostics/target_profiles.txt + analysis):
+#   LEVER 1 (DATA): mine the variance-targeted v2 pool (56% decimal-ambiguous +
+#                   30% int + 14% symbolic) instead of the broad 99%-symbolic
+#                   inzone_pool.json. Decimals are the sigma=0.5 engine that the
+#                   two TOP earners (B_5DARq6, D_5HQbAQ4 = cumTAO #1/#2) ride;
+#                   "17.5"!="17.50" / "83.33"!="83.333" naturally split a converged
+#                   model in/out of the validator's parser -> in-zone with clean EOS.
+#                   Build with: cd /root/reliquary &&
+#                     .venv/bin/python /root/sn81-miner/dataprep/build_inzone_v2.py
+#   LEVER 2 (SELECTION): curate toward k=4 (sigma=0.5, MAX gradient signal, furthest
+#                   from the sigma>=0.43 reject edge) instead of k=5 (sigma=0.484).
+#                   B/D sit ~60% at sigma=0.5; A_5F6VZ2's weakness was floor-pinning
+#                   at sigma=0.433 (k=2/6).
+# EVERYTHING ELSE is inherited verbatim from run_miner.sh so the change is
+# attributable to the two levers above. Writes to logs/miner_v2.log + miner_v2.pid
+# and uses a FRESH hot pool (the old one was built from the symbolic pool).
+#
+# NOTE: one GPU + one hotkey -> this REPLACES the production miner. Run only when
+# you intend to switch strategies.
+# ===========================================================================
+cd /root/reliquary || exit 1
+for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+pkill -9 -f "reliquary.cli.main mine" 2>/dev/null || true
+sleep 2
+set -a; source scripts/.env; set +a
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# --- ACCEPTANCE / LATENCY fix (windows seal in ~60-90s; firing all 8 groups into one
+# already-sealed window = batch_filled every time). Submit only 2 groups/window FAST and
+# RETAIN the rest for the next window's loop iteration -> cover MANY fresh windows, land in
+# the early drand rounds where the 8 prompt-slots are actually won. (engine.py reads this.)
+export RELIQUARY_MAX_PER_WINDOW=2
+# reject_dump diagnostic is now gated OFF in engine.py (was a synchronous 28MB append in the
+# submit hot path, blocking the burst); leave RELIQUARY_REJECT_DUMP unset = off.
+
+# --- curation knobs ---
+export RELIQUARY_CURATE=1
+export RELIQUARY_CURATE_TARGET_K=4      # CHANGED 5->4: target sigma=0.5 (4 correct + 4 wrong),
+                                        # the max-gradient center of the in-zone band.
+export RELIQUARY_CURATE_MARGIN=2        # validate 4+2 correct / 4+2 wrong candidates, keep first passing
+export RELIQUARY_SAFE_P_STOP=0.10       # (inherited) comfortable termination margin vs validator p_stop>=0.01
+
+# --- two-stage screen (inherited from run_miner.sh; wide band aids discovery) ---
+export RELIQUARY_SCREEN_OVERSAMPLE=24
+export RELIQUARY_SCREEN_MAX_TOKENS=1024
+export RELIQUARY_SCREEN_MIN_TERM=4
+export RELIQUARY_SCREEN_P_LOW=0.03      # keep prompts with >=~2 wrong present
+export RELIQUARY_SCREEN_P_HIGH=0.97     # keep prompts with some wrong (drop pure 8/8)
+# To bias discovery toward the ~50/50 prompts k=4 wants, optionally tighten to
+# P_LOW=0.15 / P_HIGH=0.85 (fewer pass the screen, but more are curatable at k=4).
+
+# --- FRESH hot pool for the new strategy; SHARED burned-idx blocklist ---
+export RELIQUARY_HOT_POOL_PATH=/root/sn81-miner/data/hot_pool_v2.json
+export RELIQUARY_HOT_FRAC=0.5
+export RELIQUARY_HOT_CAP=4000
+# FRESH burned-list for v2: this session wrongly burned many decimals on batch_filled
+# (now fixed in engine.py). v2 has 0 real accepts so nothing legitimate is lost; a clean
+# blocklist un-blocks those curatable decimals so the buffer can stay fed.
+export RELIQUARY_BURNED_PATH=/root/sn81-miner/data/submitted_idx_v2.json
+
+mkdir -p /root/sn81-miner/logs
+rm -f /root/sn81-miner/logs/miner_v2.log
+# SUBMIT RESPONSIVENESS: the no-burn fix already keeps the buffer full (pool~68 >> the
+# 48 target), so we no longer need max generation throughput. gen-batch 48 pegged the GPU
+# at 100% util and the in-process GRAIL proof forward starves the async submit loop (GIL/CPU
+# contention) -> late submissions -> batch_filled. Dial back to gen-batch 24 / pool 48: the
+# buffer still refills easily (we consume only ~2/window) while the event loop stays
+# responsive so submissions land in the early part of the window. gpu-mem stays 0.65 for the
+# multimodal proof model's headroom.
+nohup .venv/bin/python -m reliquary.cli.main mine \
+  --network finney --netuid 81 --wallet-name ronnywebdev --hotkey hdev0301 \
+  --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 \
+  --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 \
+  --max-new-tokens 1024 --oversample 64 \
+  --prompt-idx-file /root/sn81-miner/data/inzone_pool_v2.json --two-stage \
+  --log-level INFO > /root/sn81-miner/logs/miner_v2.log 2>&1 &
+echo $! > /root/sn81-miner/miner_v2.pid
+echo "launched V2 PID=$(cat /root/sn81-miner/miner_v2.pid) | pool=inzone_pool_v2.json k=4 | log=/root/sn81-miner/logs/miner_v2.log"

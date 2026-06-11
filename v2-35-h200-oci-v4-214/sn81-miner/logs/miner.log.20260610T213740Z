@@ -1,0 +1,135 @@
+2026-06-10 21:23:49 | MainThread | reliquary.cli | INFO | Starting Reliquary miner (network=finney, netuid=81, env=opencodeinstruct)
+2026-06-10 21:23:49 | MainThread | bittensor | INFO | Enabling default logging (Warning level)
+[34m2026-06-10 21:23:49.543[39m | [1m[37m  INFO  [0m | Enabling default logging (Warning level)
+2026-06-10 21:23:52 | MainThread | httpx | INFO | HTTP Request: GET http://86.38.238.30:8080/state "HTTP/1.1 200 OK"
+2026-06-10 21:23:53 | MainThread | httpx | INFO | HTTP Request: GET https://huggingface.co/api/models/R0mAI/reliquary-sn-v23/revision/902490e6a434d86d790f990f050cd0aba9b5d21d "HTTP/1.1 200 OK"
+Fetching 7 files:   0%|          | 0/7 [00:00<?, ?it/s]Fetching 7 files: 100%|██████████| 7/7 [00:00<00:00, 33864.05it/s]
+INFO 06-10 21:23:55 [utils.py:233] non-default args: {'tokenizer': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d', 'dtype': 'bfloat16', 'max_model_len': 2304, 'enable_prefix_caching': True, 'gpu_memory_utilization': 0.72, 'max_num_seqs': 512, 'disable_log_stats': True, 'enforce_eager': True, 'limit_mm_per_prompt': {'image': 0, 'video': 0}, 'model': '/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d'}
+INFO 06-10 21:23:55 [model.py:555] Resolved architecture: Qwen3_5ForConditionalGeneration
+INFO 06-10 21:23:55 [model.py:1680] Using max model len 2304
+INFO 06-10 21:23:55 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=16384.
+WARNING 06-10 21:23:55 [config.py:367] Mamba cache mode is set to 'align' for Qwen3_5ForConditionalGeneration by default when prefix caching is enabled
+INFO 06-10 21:23:55 [config.py:387] Warning: Prefix caching in Mamba cache 'align' mode is currently enabled. Its support for Mamba layers is experimental. Please report any issues you may observe.
+INFO 06-10 21:23:55 [vllm.py:840] Asynchronous scheduling is enabled.
+WARNING 06-10 21:23:55 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+WARNING 06-10 21:23:55 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 06-10 21:23:55 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+INFO 06-10 21:23:56 [vllm.py:1089] Cudagraph is disabled under eager mode
+INFO 06-10 21:23:56 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+INFO 06-10 21:23:57 [nixl_utils.py:20] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+WARNING 06-10 21:23:57 [nixl_utils.py:34] NIXL is not available
+WARNING 06-10 21:23:57 [nixl_utils.py:44] NIXL agent config is not available
+[transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+INFO 06-10 21:23:57 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=725302) INFO 06-10 21:24:02 [core.py:109] Initializing a V1 LLM engine (v0.20.2) with config: model='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d', speculative_config=None, tokenizer='/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=2304, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [16384], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['vllm_c', 'native']), enable_flashinfer_autotune=True, moe_backend='auto')
+(EngineCore pid=725302) WARNING 06-10 21:24:03 [nixl_utils.py:34] NIXL is not available
+(EngineCore pid=725302) WARNING 06-10 21:24:03 [nixl_utils.py:44] NIXL agent config is not available
+(EngineCore pid=725302) [transformers] `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+(EngineCore pid=725302) INFO 06-10 21:24:04 [registry.py:126] All limits of multimodal modalities supported by the model are set to 0, running in text-only mode.
+(EngineCore pid=725302) INFO 06-10 21:24:04 [parallel_state.py:1402] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.20.0.2:34891 backend=nccl
+(EngineCore pid=725302) INFO 06-10 21:24:04 [parallel_state.py:1715] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+(EngineCore pid=725302) INFO 06-10 21:24:05 [gpu_model_runner.py:4777] Starting to load model /root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d...
+(EngineCore pid=725302) INFO 06-10 21:24:05 [cuda.py:423] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(EngineCore pid=725302) INFO 06-10 21:24:05 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(EngineCore pid=725302) INFO 06-10 21:24:05 [gdn_linear_attn.py:146] Using FlashInfer GDN prefill kernel
+(EngineCore pid=725302) INFO 06-10 21:24:05 [gdn_linear_attn.py:147] FlashInfer GDN prefill kernel is JIT-compiled; first run may take a while to compile. Set `--gdn-prefill-backend triton` to avoid JIT compile time.
+(EngineCore pid=725302) INFO 06-10 21:24:05 [cuda.py:368] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=725302) INFO 06-10 21:24:05 [flash_attn.py:646] Using FlashAttention version 3
+(EngineCore pid=725302) INFO 06-10 21:24:05 [weight_utils.py:904] Filesystem type for checkpoints: EXT4. Checkpoint size: 8.46 GiB. Available RAM: 225.88 GiB.
+(EngineCore pid=725302) INFO 06-10 21:24:05 [weight_utils.py:927] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=725302) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+(EngineCore pid=725302) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.22s/it]
+(EngineCore pid=725302) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.22s/it]
+(EngineCore pid=725302) 
+(EngineCore pid=725302) INFO 06-10 21:24:07 [default_loader.py:384] Loading weights took 1.36 seconds
+(EngineCore pid=725302) INFO 06-10 21:24:07 [gpu_model_runner.py:4879] Model loading took 7.96 GiB memory and 1.858336 seconds
+(EngineCore pid=725302) INFO 06-10 21:24:07 [interface.py:606] Setting attention block size to 528 tokens to ensure that attention page size is >= mamba page size.
+(EngineCore pid=725302) INFO 06-10 21:24:07 [interface.py:630] Padding mamba page size by 0.76% to ensure that mamba page size and attention page size are exactly equal.
+(EngineCore pid=725302) INFO 06-10 21:24:08 [gpu_worker.py:440] Available KV cache memory: 90.58 GiB
+(EngineCore pid=725302) INFO 06-10 21:24:08 [kv_cache_utils.py:1708] GPU KV cache size: 1,177,344 tokens
+(EngineCore pid=725302) INFO 06-10 21:24:08 [kv_cache_utils.py:1709] Maximum concurrency for 2,304 tokens per request: 511.00x
+(EngineCore pid=725302) 2026-06-10 21:24:09,406 - INFO - autotuner.py:457 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=725302) 2026-06-10 21:24:09,474 - INFO - autotuner.py:466 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=725302) INFO 06-10 21:24:09 [core.py:306] init engine (profile, create kv cache, warmup model) took 2.32 s
+(EngineCore pid=725302) INFO 06-10 21:24:09 [vllm.py:840] Asynchronous scheduling is enabled.
+(EngineCore pid=725302) WARNING 06-10 21:24:09 [vllm.py:896] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=725302) WARNING 06-10 21:24:09 [vllm.py:914] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=725302) INFO 06-10 21:24:09 [kernel.py:205] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['vllm_c', 'native'])
+(EngineCore pid=725302) INFO 06-10 21:24:09 [vllm.py:1089] Cudagraph is disabled under eager mode
+(EngineCore pid=725302) INFO 06-10 21:24:09 [compilation.py:303] Enabled custom fusions: norm_quant, act_quant
+2026-06-10 21:24:09 | MainThread | reliquary.miner.vllm_backend | INFO | vLLM generator ready: model=/root/.cache/huggingface/hub/models--R0mAI--reliquary-sn-v23/snapshots/902490e6a434d86d790f990f050cd0aba9b5d21d gpu_mem_util=0.72 eos_set=[248044, 248046]
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/723 [00:00<?, ?it/s]Loading weights: 100%|██████████| 723/723 [00:00<00:00, 12692.35it/s]
+2026-06-10 21:24:12 | MainThread | reliquary.miner.pregen | INFO | env dataset has no 'problem_source' column -> uniform sampling
+2026-06-10 21:24:12 | MainThread | reliquary.miner.pregen | INFO | EXPLICIT prompt-idx pool: 4 prompts (source filter + frontier bypassed)
+2026-06-10 21:24:13 | MainThread | reliquary.miner.pregen | INFO | consensus EXACT-grading cases loaded: 50000 prompts (/root/sn81-miner/data/oci_cases_v2.json)
+2026-06-10 21:24:13 | MainThread | reliquary.miner.pregen | INFO | OCI CONSENSUS curation ENABLED (workers=22 timeout=5.0s, dir=/root/sn81-miner/opencode, exact_cases=50000)
+2026-06-10 21:24:13 | MainThread | reliquary.miner.engine | INFO | burned blocklist loaded: 80 prompt idxs
+2026-06-10 21:24:13 | MainThread | reliquary.miner.engine | INFO | BURN_COOLDOWN on: prompt_in_cooldown rejects are burned (permanent SN81 cooldown)
+2026-06-10 21:24:13 | pregen | reliquary.miner.pregen | INFO | pregen thread started (target_ready=48, batch=24)
+Rendering prompts:   0%|          | 0/2 [00:00<?, ?it/s]Rendering prompts:  50%|█████     | 1/2 [00:00<00:00,  1.52it/s]Rendering prompts: 100%|██████████| 2/2 [00:00<00:00,  3.04it/s]
+Processed prompts:   0%|          | 0/64 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]2026-06-10 21:24:14 | MainThread | reliquary.miner.engine | INFO | PROBE-DETECT win=13146 valid_subs=3 state=OPEN rand_ready=True
+2026-06-10 21:24:23 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=44 in 10.1s (4/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:24:33 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=49 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:24:43 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+Processed prompts:  50%|█████     | 32/64 [00:33<00:33,  1.06s/it, est. speed input: 216.00 toks/s, output: 494.90 toks/s]Processed prompts: 100%|██████████| 64/64 [00:33<00:00,  1.06s/it, est. speed input: 626.30 toks/s, output: 1082.25 toks/s]Processed prompts: 100%|██████████| 64/64 [00:33<00:00,  1.89it/s, est. speed input: 626.30 toks/s, output: 1082.25 toks/s]
+2026-06-10 21:24:49 | pregen | reliquary.miner.pregen | INFO | consensus idx=42652 GRADED SHIP sigma=0.500 n_graded=31 static=1
+2026-06-10 21:24:51 | pregen | reliquary.miner.pregen | INFO | consensus idx=11527 GRADED SHIP sigma=0.484 n_graded=31 static=0
+2026-06-10 21:24:51 | pregen | reliquary.miner.pregen | INFO | pregen batch detail: kept=2 drop[<8comp=0 not_curatable=0 safety=0] avg_completions=31.0 avg_n_correct=0.0 curate=True
+2026-06-10 21:24:51 | pregen | reliquary.miner.pregen | INFO | pregen: +2/2 in-zone groups (pool=2, ckpt=902490e6a4)
+2026-06-10 21:24:53 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:04 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=33 in 11.2s (3/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:15 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=38 in 10.5s (4/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:25 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.1s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:35 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:45 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:25:55 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:06 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=31 in 10.1s (3/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:16 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.3s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:26 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:36 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:46 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:26:56 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:06 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:16 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=32 in 10.0s (3/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:26 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:37 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=42 in 10.1s (4/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:47 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=42 in 10.1s (4/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:27:57 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:07 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:17 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:27 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=32 in 10.1s (3/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:37 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:47 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:28:57 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=3 rand=True
+2026-06-10 21:29:07 | MainThread | reliquary.miner.engine | INFO | verdict ACCEPTED win=13146 mr=5b2a3f4060b9 | sub=29441191 arr=29441191 trig=None over=None tol=None stage=None rank=None qwait=2.218484878540039ms verify=6532.320022583008ms total=7027.030944824219ms
+2026-06-10 21:29:07 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:29:17 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:29:29 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=41 in 12.0s (3/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:29:40 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.1s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:29:50 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:00 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:10 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:20 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=44 in 10.1s (4/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:30 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:42 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=41 in 12.6s (3/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:30:53 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:31:03 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:31:13 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:31:23 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.2s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:31:33 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.0s (5/s) | win=13146 state=OPEN valid_subs=4 rand=True
+2026-06-10 21:31:43 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=31 in 10.5s (3/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:31:43 | MainThread | reliquary.miner.engine | INFO | PROBE-DETECT win=13147 valid_subs=0 state=OPEN rand_ready=True
+2026-06-10 21:31:55 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=35 in 11.4s (3/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:05 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:15 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:25 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:35 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:45 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=48 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:32:55 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.2s (5/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:33:05 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=31 in 10.1s (3/s) | win=13147 state=OPEN valid_subs=0 rand=True
+2026-06-10 21:33:15 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=46 in 10.0s (5/s) | win=13147 state=OPEN valid_subs=1 rand=True
+2026-06-10 21:33:26 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=40 in 10.2s (4/s) | win=13147 state=OPEN valid_subs=1 rand=True
+2026-06-10 21:33:36 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=1 rand=True
+2026-06-10 21:33:46 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=1 rand=True
+2026-06-10 21:33:56 | MainThread | reliquary.miner.engine | INFO | PROBE-HB polls=47 in 10.1s (5/s) | win=13147 state=OPEN valid_subs=1 rand=True
