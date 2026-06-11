@@ -1,0 +1,12 @@
+watch start: origin/main=dbcdea102deb9c410b3d57ba7429ee5ae2446f8a
+06:08:56 iter=1/36 no main change | branches: origin/codex/qwen35-production-readiness origin/fix/quarantine-truncation-policy origin/fix/reward-shape-truncation-guards 
+06:18:57 iter=2/36 no main change | branches: origin/codex/qwen35-production-readiness origin/fix/quarantine-truncation-policy origin/fix/reward-shape-truncation-guards 
+06:28:57 iter=3/36 no main change | branches: origin/codex/qwen35-production-readiness origin/fix/quarantine-truncation-policy origin/fix/reward-shape-truncation-guards 
+06:38:58 iter=4/36 no main change | branches: origin/codex/qwen35-production-readiness origin/fix/quarantine-truncation-policy origin/fix/reward-shape-truncation-guards 
+06:48:58 iter=5/36 no main change | branches: origin/codex/qwen35-production-readiness origin/fix/quarantine-truncation-policy origin/fix/reward-shape-truncation-guards 
+SIGNAL=main_advanced iter=6 : origin/main dbcdea102deb9c410b3d57ba7429ee5ae2446f8a -> cbb1e456460407389894ab13fb95024795e8b2bc
+--- new commits ---
+cbb1e45 Merge pull request #79 from reliquadotai/codex/fix-qwen35-tokenizer-pstop
+4fae4d3 fix(validator): pass tokenizer into proof p_stop
+--- validator files touched ---
+reliquary/validator/batcher.py

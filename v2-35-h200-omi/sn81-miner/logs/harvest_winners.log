@@ -1,0 +1,10 @@
+==== harvest watchdog (re)start 2026-06-10 20:50:13 ====
+[2026-06-10 20:50:13] harvest loop START: every 1800s -> /root/sn81-miner/data/topminer_winners.jsonl (hotkeys=default)
+harvested 248 distinct winners from 1/1 hotkey(s), 60 windows -> /root/sn81-miner/data/topminer_winners.jsonl
+[2026-06-10 20:50:13] next harvest in 1800s
+harvested 242 distinct winners from 1/1 hotkey(s), 59 windows -> /root/sn81-miner/data/topminer_winners.jsonl
+[2026-06-10 21:20:15] next harvest in 1800s
+harvested 235 distinct winners from 1/1 hotkey(s), 57 windows -> /root/sn81-miner/data/topminer_winners.jsonl
+[2026-06-10 21:50:26] next harvest in 1800s
+harvested 215 distinct winners from 1/1 hotkey(s), 56 windows -> /root/sn81-miner/data/topminer_winners.jsonl
+[2026-06-10 22:20:26] next harvest in 1800s

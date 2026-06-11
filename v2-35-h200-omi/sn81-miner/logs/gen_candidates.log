@@ -1,0 +1,127 @@
+=== HARDEST-band generator | LOOP=1 interval=1800s cap=16 | math_split={0 1} max_len={400 700} canon={1.00 0.30} int=0.0 OMI_SHARDS=4 ===
+[2026-06-10 14:51:27] cycle seed=0  (1/16 candidates on disk)
+  built inzone_pool_cand_m0_l400_c100.json  size=474572 idxs  (math_split=0 max_len=400 canon=1.00)
+  built inzone_pool_cand_m0_l400_c30.json  size=142372 idxs  (math_split=0 max_len=400 canon=0.30)
+  skip (exists): inzone_pool_cand_m0_l700_c100.json
+  built inzone_pool_cand_m0_l700_c30.json  size=152346 idxs  (math_split=0 max_len=700 canon=0.30)
+  built inzone_pool_cand_m1_l400_c100.json  size=89662 idxs  (math_split=1 max_len=400 canon=1.00)
+  built inzone_pool_cand_m1_l400_c30.json  size=26899 idxs  (math_split=1 max_len=400 canon=0.30)
+  built inzone_pool_cand_m1_l700_c100.json  size=96192 idxs  (math_split=1 max_len=700 canon=1.00)
+  built inzone_pool_cand_m1_l700_c30.json  size=28858 idxs  (math_split=1 max_len=700 canon=0.30)
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 14:51:54] sleeping 1800s ...
+[2026-06-10 15:21:54] cycle seed=1  (8/16 candidates on disk)
+  built inzone_pool_cand_m0_l400_c100_g1.json  size=474572 idxs  (math_split=0 max_len=400 canon=1.00)
+  built inzone_pool_cand_m0_l400_c30_g1.json  size=142372 idxs  (math_split=0 max_len=400 canon=0.30)
+  built inzone_pool_cand_m0_l700_c100_g1.json  size=507820 idxs  (math_split=0 max_len=700 canon=1.00)
+  built inzone_pool_cand_m0_l700_c30_g1.json  size=152346 idxs  (math_split=0 max_len=700 canon=0.30)
+  built inzone_pool_cand_m1_l400_c100_g1.json  size=89662 idxs  (math_split=1 max_len=400 canon=1.00)
+  built inzone_pool_cand_m1_l400_c30_g1.json  size=26899 idxs  (math_split=1 max_len=400 canon=0.30)
+  built inzone_pool_cand_m1_l700_c100_g1.json  size=96192 idxs  (math_split=1 max_len=700 canon=1.00)
+  built inzone_pool_cand_m1_l700_c30_g1.json  size=28858 idxs  (math_split=1 max_len=700 canon=0.30)
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 15:22:27] sleeping 1800s ...
+[2026-06-10 15:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 15:52:27] sleeping 1800s ...
+[2026-06-10 16:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 16:22:27] sleeping 1800s ...
+[2026-06-10 16:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 16:52:27] sleeping 1800s ...
+[2026-06-10 17:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 17:22:27] sleeping 1800s ...
+[2026-06-10 17:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 17:52:27] sleeping 1800s ...
+[2026-06-10 18:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 18:22:27] sleeping 1800s ...
+[2026-06-10 18:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 18:52:27] sleeping 1800s ...
+[2026-06-10 19:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 19:22:27] sleeping 1800s ...
+[2026-06-10 19:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 19:52:27] sleeping 1800s ...
+[2026-06-10 20:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 20:22:27] sleeping 1800s ...
+[2026-06-10 20:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 20:52:27] sleeping 1800s ...
+[2026-06-10 21:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 21:22:27] sleeping 1800s ...
+[2026-06-10 21:52:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 21:52:27] sleeping 1800s ...
+[2026-06-10 22:22:27] cycle seed=2  (16/16 candidates on disk)
+  at cap — waiting for the watchdog to prune losers before generating more
+  --- accept->pool tally (from pool_accepts.log) ---
+          9 pool=inzone_pool_cand_m0_l400_c30_g1.json
+          2 pool=inzone_pool_cand_m0_l400_c100.json
+          1 pool=inzone_pool_cand_m0_l700_c100_g1.json
+[2026-06-10 22:22:27] sleeping 1800s ...

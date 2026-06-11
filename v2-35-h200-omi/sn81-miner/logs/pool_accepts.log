@@ -1,0 +1,12 @@
+[2026-06-10 05:15:14] ACCEPT pool=inzone_pool_cand_m0_l400_c100.json win=12977 max_new=1024
+[2026-06-10 05:15:14] ACCEPT pool=inzone_pool_cand_m0_l400_c100.json win=12977 max_new=1024
+[2026-06-10 06:19:43] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12988 max_new=1024
+[2026-06-10 06:22:03] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12988 max_new=1024
+[2026-06-10 06:31:24] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12990 max_new=1024
+[2026-06-10 06:33:04] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12990 max_new=1024
+[2026-06-10 06:33:04] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12990 max_new=1024
+[2026-06-10 06:37:44] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12991 max_new=1024
+[2026-06-10 06:58:06] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12995 max_new=1024
+[2026-06-10 07:00:46] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12996 max_new=1024
+[2026-06-10 07:05:47] ACCEPT pool=inzone_pool_cand_m0_l400_c30_g1.json win=12997 max_new=1024
+[2026-06-10 08:11:38] ACCEPT pool=inzone_pool_cand_m0_l700_c100_g1.json win=13009 max_new=1024

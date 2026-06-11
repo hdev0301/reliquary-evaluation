@@ -1,0 +1,134 @@
+==== watchdog (re)start 2026-06-10 04:15:06 ====
+[2026-06-10 04:15:06] watchdog start: 11 pools | start=inzone_pool_v2_numeric.json | rotate after 6 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 04:15:08] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 04:15:08] launched miner PID=13011 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 04:17:30 ====
+[2026-06-10 04:17:30] watchdog start: 11 pools | start=inzone_pool_v2_numeric.json | rotate after 5 win w/o ACCEPT | prune=1 (prefix inzone_pool_cand_)
+[2026-06-10 04:17:32] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 04:17:32] launched miner PID=13359 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 04:23:03 ====
+[2026-06-10 04:23:03] watchdog start: 11 pools | start=inzone_pool_v2_numeric.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 04:23:05] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 04:23:05] launched miner PID=13889 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 04:24:19 ====
+[2026-06-10 04:24:19] watchdog start: 11 pools | start=inzone_pool_v2_numeric.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 04:24:21] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 04:24:21] launched miner PID=14176 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 04:36:48 ====
+[2026-06-10 04:36:49] watchdog start: 11 pools | start=inzone_pool_v2_numeric.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 04:36:51] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 04:36:51] launched miner PID=14950 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 04:57:08 ====
+[2026-06-10 04:57:08] watchdog start: 11 pools | start=inzone_pool_v2_symbolic.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 04:57:10] cleared hot pool (active pool changed -> inzone_pool_v2_symbolic.json)
+[2026-06-10 04:57:10] launched miner PID=16450 pool=inzone_pool_v2_symbolic.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 05:07:11] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_v2_symbolic.json -> next inzone_pool_cand_m0_l400_c100.json
+/root/sn81-miner/bin/run_miner_random.sh: line 64: 16450 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 05:07:13] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c100.json)
+[2026-06-10 05:07:13] launched miner PID=17073 pool=inzone_pool_cand_m0_l400_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 05:15:14] ACCEPT on inzone_pool_cand_m0_l400_c100.json (accepts=2 win=12977) -> logged to pool_accepts.log
+[2026-06-10 05:42:16] ROTATE (no ACCEPT for 5 windows) on inzone_pool_cand_m0_l400_c100.json -> next inzone_pool_cand_m0_l400_c30.json
+/root/sn81-miner/bin/run_miner_random.sh: line 64: 17073 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 05:42:18] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c30.json)
+[2026-06-10 05:42:18] launched miner PID=19078 pool=inzone_pool_cand_m0_l400_c30.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 06:09:20] ROTATE (no ACCEPT for 5 windows) on inzone_pool_cand_m0_l400_c30.json -> next inzone_pool_cand_m0_l400_c30_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 64: 19078 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 06:09:22] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c30_g1.json)
+[2026-06-10 06:09:22] launched miner PID=20269 pool=inzone_pool_cand_m0_l400_c30_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 06:19:43] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=1 win=12988) -> logged to pool_accepts.log
+[2026-06-10 06:22:03] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=2 win=12988) -> logged to pool_accepts.log
+[2026-06-10 06:31:24] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=3 win=12990) -> logged to pool_accepts.log
+[2026-06-10 06:33:04] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=5 win=12990) -> logged to pool_accepts.log
+[2026-06-10 06:37:44] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=6 win=12991) -> logged to pool_accepts.log
+[2026-06-10 06:58:06] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=7 win=12995) -> logged to pool_accepts.log
+[2026-06-10 07:00:46] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=8 win=12996) -> logged to pool_accepts.log
+[2026-06-10 07:05:47] ACCEPT on inzone_pool_cand_m0_l400_c30_g1.json (accepts=9 win=12997) -> logged to pool_accepts.log
+==== watchdog (re)start 2026-06-10 07:48:30 ====
+[2026-06-10 07:48:30] watchdog start: 19 pools | start=inzone_pool_cand_m0_l400_c30_g1.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 07:48:32] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c30_g1.json)
+[2026-06-10 07:48:32] launched miner PID=24888 pool=inzone_pool_cand_m0_l400_c30_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 07:58:33] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m0_l400_c30_g1.json -> next inzone_pool_cand_m0_l700_c100.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 24888 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 07:58:35] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l700_c100.json)
+[2026-06-10 07:58:35] launched miner PID=25517 pool=inzone_pool_cand_m0_l700_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 08:08:36] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m0_l700_c100.json -> next inzone_pool_cand_m0_l700_c100_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 25517 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 08:08:38] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l700_c100_g1.json)
+[2026-06-10 08:08:38] launched miner PID=26129 pool=inzone_pool_cand_m0_l700_c100_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 08:11:38] ACCEPT on inzone_pool_cand_m0_l700_c100_g1.json (accepts=1 win=13009) -> logged to pool_accepts.log
+[2026-06-10 08:36:00] ROTATE (no ACCEPT for 5 windows (leash=3)) on inzone_pool_cand_m0_l700_c100_g1.json -> next inzone_pool_cand_m0_l700_c30.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 26129 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 08:36:02] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l700_c30.json)
+[2026-06-10 08:36:02] launched miner PID=27515 pool=inzone_pool_cand_m0_l700_c30.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 09:08:05] ROTATE (no ACCEPT for 6 windows (leash=5)) on inzone_pool_cand_m0_l700_c30.json -> next inzone_pool_cand_m0_l700_c30_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 27515 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 09:08:07] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l700_c30_g1.json)
+[2026-06-10 09:08:07] launched miner PID=29100 pool=inzone_pool_cand_m0_l700_c30_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 09:30:28] ROTATE (no ACCEPT for 5 windows (leash=5)) on inzone_pool_cand_m0_l700_c30_g1.json -> next inzone_pool_cand_m1_l400_c100.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 29100 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 09:30:31] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l400_c100.json)
+[2026-06-10 09:30:31] launched miner PID=30121 pool=inzone_pool_cand_m1_l400_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:03:33] ROTATE (no ACCEPT for 7 windows (leash=5)) on inzone_pool_cand_m1_l400_c100.json -> next inzone_pool_cand_m1_l400_c100_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 30121 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:03:36] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l400_c100_g1.json)
+[2026-06-10 10:03:36] launched miner PID=31505 pool=inzone_pool_cand_m1_l400_c100_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:13:36] ROTATE (no submissions for 600s (pool produced nothing)) on inzone_pool_cand_m1_l400_c100_g1.json -> next inzone_pool_cand_m1_l400_c30.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 31505 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:13:38] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l400_c30.json)
+[2026-06-10 10:13:38] launched miner PID=32140 pool=inzone_pool_cand_m1_l400_c30.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:23:39] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m1_l400_c30.json -> next inzone_pool_cand_m1_l400_c30_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 32140 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:23:42] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l400_c30_g1.json)
+[2026-06-10 10:23:42] launched miner PID=32807 pool=inzone_pool_cand_m1_l400_c30_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:33:43] ROTATE (no submissions for 600s (pool produced nothing)) on inzone_pool_cand_m1_l400_c30_g1.json -> next inzone_pool_cand_m1_l700_c100.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 32807 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:33:45] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l700_c100.json)
+[2026-06-10 10:33:45] launched miner PID=33403 pool=inzone_pool_cand_m1_l700_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:43:46] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m1_l700_c100.json -> next inzone_pool_cand_m1_l700_c100_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 33403 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:43:48] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l700_c100_g1.json)
+[2026-06-10 10:43:48] launched miner PID=34007 pool=inzone_pool_cand_m1_l700_c100_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 10:53:49] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m1_l700_c100_g1.json -> next inzone_pool_cand_m1_l700_c30.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 34007 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 10:53:51] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l700_c30.json)
+[2026-06-10 10:53:51] launched miner PID=34627 pool=inzone_pool_cand_m1_l700_c30.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 13:14:23] ROTATE (no ACCEPT for 26 windows (leash=5)) on inzone_pool_cand_m1_l700_c30.json -> next inzone_pool_cand_m1_l700_c30_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 34627 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 13:14:25] cleared hot pool (active pool changed -> inzone_pool_cand_m1_l700_c30_g1.json)
+[2026-06-10 13:14:25] launched miner PID=40148 pool=inzone_pool_cand_m1_l700_c30_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 13:24:26] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m1_l700_c30_g1.json -> next inzone_pool_easyint.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 40148 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 13:24:28] cleared hot pool (active pool changed -> inzone_pool_easyint.json)
+[2026-06-10 13:24:28] launched miner PID=40772 pool=inzone_pool_easyint.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 13:34:29] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_easyint.json -> next inzone_pool_v2_numeric.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 40772 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 13:34:31] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 13:34:31] launched miner PID=41374 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 13:44:32] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_v2_numeric.json -> next inzone_pool_v2_symbolic.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 41374 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 13:44:34] cleared hot pool (active pool changed -> inzone_pool_v2_symbolic.json)
+[2026-06-10 13:44:34] launched miner PID=42185 pool=inzone_pool_v2_symbolic.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 13:54:35] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_v2_symbolic.json -> next inzone_pool_cand_m0_l400_c100.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 42185 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 13:54:37] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c100.json)
+[2026-06-10 13:54:37] launched miner PID=42805 pool=inzone_pool_cand_m0_l400_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 14:04:38] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m0_l400_c100.json -> next inzone_pool_cand_m0_l400_c100_g1.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 42805 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 14:04:40] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c100_g1.json)
+[2026-06-10 14:04:40] launched miner PID=43390 pool=inzone_pool_cand_m0_l400_c100_g1.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 14:14:41] ROTATE (no submissions for 601s (pool produced nothing)) on inzone_pool_cand_m0_l400_c100_g1.json -> next inzone_pool_cand_m0_l400_c30.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 43390 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 14:14:43] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l400_c30.json)
+[2026-06-10 14:14:43] launched miner PID=43983 pool=inzone_pool_cand_m0_l400_c30.json | log=/root/sn81-miner/logs/miner.log
+==== watchdog (re)start 2026-06-10 14:50:06 ====
+[2026-06-10 14:50:06] watchdog start: 4 pools | start=inzone_pool_cand_m0_l700_c100.json | rotate after 5 win w/o ACCEPT | prune=0 (prefix inzone_pool_cand_)
+[2026-06-10 14:50:08] cleared hot pool (active pool changed -> inzone_pool_cand_m0_l700_c100.json)
+[2026-06-10 14:50:08] launched miner PID=46321 pool=inzone_pool_cand_m0_l700_c100.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 15:33:11] ROTATE (no ACCEPT for 5 windows (leash=5)) on inzone_pool_cand_m0_l700_c100.json -> next inzone_pool_easyint.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 46321 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 15:33:14] cleared hot pool (active pool changed -> inzone_pool_easyint.json)
+[2026-06-10 15:33:14] launched miner PID=49076 pool=inzone_pool_easyint.json | log=/root/sn81-miner/logs/miner.log
+[2026-06-10 16:04:56] ROTATE (no ACCEPT for 5 windows (leash=5)) on inzone_pool_easyint.json -> next inzone_pool_v2_numeric.json
+/root/sn81-miner/bin/run_miner_random.sh: line 65: 49076 Killed                  nohup .venv/bin/python -m reliquary.cli.main mine --network finney --netuid 81 --wallet-name ronnywebdev --hotkey stardev --checkpoint Qwen/Qwen3.5-4B --validator-url http://86.38.238.30:8080 --gpu-memory-utilization 0.65 --pool-size 48 --gen-batch 8 --max-new-tokens 1024 --oversample "${OVERSAMPLE:-128}" --prompt-idx-file "$pool" --two-stage --log-level INFO > "$LOG" 2>&1
+[2026-06-10 16:04:58] cleared hot pool (active pool changed -> inzone_pool_v2_numeric.json)
+[2026-06-10 16:04:58] launched miner PID=51584 pool=inzone_pool_v2_numeric.json | log=/root/sn81-miner/logs/miner.log
